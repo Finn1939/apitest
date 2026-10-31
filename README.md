@@ -8,7 +8,7 @@ A configurable Discord chat and research bot. It can chat conversationally, resp
 2. Under **Bot**, enable **Message Content Intent**.
 3. Invite the bot with `bot` permissions and the permission to read/send messages.
 4. Create a [NVIDIA API key](https://build.nvidia.com/) for the NVIDIA API Catalog.
-5. Install Node.js 20 or newer.
+5. Install Node.js 19 or newer.
 6. Copy `.env.example` to `.env` and fill in the values.
 
 ```bash
