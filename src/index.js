@@ -4,6 +4,7 @@ import { config, validateConfig } from "./config.js";
 import { parseCommand } from "./commands.js";
 import { askAI } from "./ai.js";
 import { searchWeb } from "./search.js";
+import { HISTORY_LIMIT, addFact, addHistory, parseRememberCommand } from "./memory.js";
 
 validateConfig();
 
@@ -18,6 +19,7 @@ const client = new Client({
 });
 
 const conversations = new Map();
+const channelFacts = new Map();
 const spontaneousReplies = new Map();
 
 function randomDelay(minMinutes, maxMinutes) {
@@ -26,8 +28,18 @@ function randomDelay(minMinutes, maxMinutes) {
 
 function rememberBotMessage(channelId, answer) {
   const history = conversations.get(channelId) || [];
-  history.push({ role: "assistant", content: answer });
-  conversations.set(channelId, history.slice(-12));
+  conversations.set(channelId, addHistory(history, { role: "assistant", content: answer }));
+}
+
+function rememberUserMessage(channelId, displayName, content) {
+  const history = conversations.get(channelId) || [];
+  const entry = { role: "user", content: `${displayName}: ${content}` };
+  conversations.set(channelId, addHistory(history, entry));
+}
+
+function factsContext(channelId) {
+  const facts = channelFacts.get(channelId) || [];
+  return facts.length ? `Things explicitly remembered in this channel:\n${facts.map((fact) => `- ${fact}`).join("\n")}` : "";
 }
 
 async function sendSpontaneousMessage(channel) {
@@ -66,6 +78,8 @@ client.once(Events.ClientReady, (readyClient) => {
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) return;
 
+  rememberUserMessage(message.channel.id, message.member?.displayName || message.author.username, message.content);
+
   const mentioned = message.mentions.has(client.user);
   const command = parseCommand(message.content, config.prefix);
   if (!mentioned && command === null) {
@@ -100,22 +114,38 @@ client.on(Events.MessageCreate, async (message) => {
   await message.channel.sendTyping();
   try {
     let answer;
-    if (command !== null) {
-      const results = await searchWeb(prompt);
-      const context = results.length
-        ? `Use these current search results as supporting information. Include a source link when useful:\n${results
-          .map((result, index) => `${index + 1}. ${result.title}\n${result.snippet}\n${result.url}`)
-          .join("\n\n")}`
-        : "No useful search result was found. Answer from reliable general knowledge and be clear that the web search returned no match.";
-      answer = await askAI({ prompt, personality: config.personality, systemContext: context });
+    const rememberedFact = !command ? parseRememberCommand(prompt) : null;
+    if (rememberedFact) {
+      const facts = channelFacts.get(message.channel.id) || [];
+      channelFacts.set(message.channel.id, addFact(facts, rememberedFact));
+      answer = `Got it, I'll remember this in this channel: ${rememberedFact}`;
+    } else if (!command && /^(forget everything|clear memory)$/i.test(prompt)) {
+      conversations.delete(message.channel.id);
+      channelFacts.delete(message.channel.id);
+      answer = "Channel memory cleared.";
     } else {
-      const historyKey = message.channel.id;
-      const history = conversations.get(historyKey) || [];
-      answer = await askAI({ prompt, personality: config.personality, conversation: history });
-      history.push({ role: "user", content: prompt }, { role: "assistant", content: answer });
-      conversations.set(historyKey, history.slice(-12));
+      if (command !== null) {
+        const results = await searchWeb(prompt);
+        const context = results.length
+          ? `Use these current search results as supporting information. Include a source link when useful:\n${results
+            .map((result, index) => `${index + 1}. ${result.title}\n${result.snippet}\n${result.url}`)
+            .join("\n\n")}`
+          : "No useful search result was found. Answer from reliable general knowledge and be clear that the web search returned no match.";
+        answer = await askAI({ prompt, personality: config.personality, systemContext: context });
+      } else {
+        const historyKey = message.channel.id;
+        const history = conversations.get(historyKey) || [];
+        const factsContextText = factsContext(historyKey);
+        answer = await askAI({
+          prompt,
+          personality: config.personality,
+          systemContext: factsContextText,
+          conversation: history.slice(0, -1).slice(-HISTORY_LIMIT),
+        });
+      }
     }
     await message.reply(answer.slice(0, 2000));
+    rememberBotMessage(message.channel.id, answer);
   } catch (error) {
     console.error(error);
     await message.reply("My brain tripped for a second. Please try again.");
