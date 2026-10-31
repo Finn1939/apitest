@@ -1,5 +1,5 @@
 import "dotenv/config";
-import { Client, Events, GatewayIntentBits, Partials } from "discord.js";
+import { Client, Events, GatewayIntentBits, Options, Partials } from "discord.js";
 import { config, validateConfig } from "./config.js";
 import { parseCommand } from "./commands.js";
 import { askAI } from "./ai.js";
@@ -11,7 +11,12 @@ import {
   loadMemory,
   parseRememberCommand,
   saveMemory,
+  buildContext,
+  logMessage,
 } from "./memory.js";
+import { createMemoryDb } from "./db.js";
+import { createJobs } from "./jobs.js";
+import { deliverReply, renderAliveness } from "./aliveness.js";
 
 validateConfig();
 
@@ -23,15 +28,39 @@ const client = new Client({
     GatewayIntentBits.DirectMessages,
   ],
   partials: [Partials.Channel],
+  makeCache: Options.cacheWithLimits({
+    MessageManager: 25,
+    UserManager: 50,
+    GuildMemberManager: 50,
+  }),
+  sweepers: {
+    messages: { interval: 300, lifetime: 1800 },
+  },
 });
 
 const storedMemory = loadMemory();
 const conversations = storedMemory.conversations;
 const channelFacts = storedMemory.facts;
 const spontaneousReplies = new Map();
+const memoryDb = createMemoryDb(config.dbPath);
+const jobs = createJobs(memoryDb);
+let pendingByChannel = new Map();
+const lastSpokeAtRef = { value: Date.now() };
+
+setInterval(() => {
+  console.log(`RSS: ${process.memoryUsage().rss} bytes`);
+  jobs.decay();
+}, 10 * 60_000).unref();
 
 function persistMemory() {
   saveMemory(conversations, channelFacts);
+}
+
+function updateAffinity(userId) {
+  memoryDb.prepare(`
+    INSERT INTO relationships(user_id, affinity) VALUES (?, 0.05)
+    ON CONFLICT(user_id) DO UPDATE SET affinity = affinity + 0.05
+  `).run(userId);
 }
 
 function randomDelay(minMinutes, maxMinutes) {
@@ -63,8 +92,12 @@ async function sendSpontaneousMessage(channel) {
   const answer = await askAI({
     prompt: "Start a brief, natural conversation in this Discord channel. Say one short thing, react to the general mood, or ask a light question. Do not mention commands or that you are a bot.",
     personality: config.personality,
+    systemContext: renderAliveness(new Date(), lastSpokeAtRef.value),
   });
-  await channel.send(answer.slice(0, 2000));
+  await deliverReply({ channel, react: async () => {} }, answer, {
+    lastSpokeAtRef,
+    spontaneous: true,
+  });
   spontaneousReplies.set(channel.id, Date.now());
   rememberBotMessage(channel.id, answer);
 }
@@ -86,10 +119,62 @@ function scheduleSpontaneousMessages() {
 client.once(Events.ClientReady, (readyClient) => {
   console.log(`Logged in as ${readyClient.user.tag}`);
   console.log(`Prefix: ${config.prefix} | Model: ${config.aiModel}`);
+  readyClient.application.commands.set([
+    { name: "memory_stats", description: "Show persistent memory statistics" },
+    { name: "memories", description: "Show remembered facts for a user", options: [{ name: "user", description: "Member to inspect", type: 6, required: true }] },
+    { name: "forget_all", description: "Forget a user's facts", options: [{ name: "user", description: "Member to forget", type: 6, required: true }] },
+    { name: "reflect_now", description: "Run a self-reflection immediately" },
+  ]).catch((error) => console.error("Failed to register memory commands:", error));
   scheduleSpontaneousMessages();
+  setInterval(() => jobs.backgroundQueue.add(() => jobs.reflect()), 7 * 24 * 60 * 60_000).unref();
+  setInterval(() => jobs.backgroundQueue.add(() => jobs.decay()), 24 * 60 * 60_000).unref();
+});
+
+function isAdmin(interaction) {
+  return config.adminUserIds.has(interaction.user.id);
+}
+
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isChatInputCommand() || !isAdmin(interaction)) return;
+  if (!["memory_stats", "memories", "forget_all", "reflect_now"].includes(interaction.commandName)) return;
+  await interaction.deferReply({ ephemeral: true });
+  if (interaction.commandName === "memory_stats") {
+    const messages = memoryDb.prepare("SELECT COUNT(*) AS count FROM messages").get().count;
+    const facts = memoryDb.prepare("SELECT COUNT(*) AS count FROM facts").get().count;
+    const last = memoryDb.prepare("SELECT MAX(created_at) AS value FROM summaries").get().value;
+    const model = memoryDb.prepare("SELECT updated_at FROM self_model WHERE id = 1").get();
+    await interaction.editReply(`Messages: ${messages}\nFacts: ${facts}\nLast consolidation: ${last ? new Date(last).toISOString() : "never"}\nSelf-model age: ${Math.round((Date.now() - model.updated_at) / 36e5)} hours`);
+  } else if (interaction.commandName === "memories") {
+    const user = interaction.options.getUser("user");
+    const rows = memoryDb.prepare(`
+      SELECT fact FROM facts WHERE subject = ? ORDER BY hits DESC, last_seen DESC LIMIT 20
+    `).all(`user:${user.username}`);
+    await interaction.editReply(rows.length ? rows.map(({ fact }) => `- ${fact}`).join("\n") : "No memories for that user.");
+  } else if (interaction.commandName === "forget_all") {
+    const user = interaction.options.getUser("user");
+    memoryDb.prepare("DELETE FROM facts WHERE subject = ?").run(`user:${user.username}`);
+    await interaction.editReply(`Forgot facts for ${user.username}.`);
+  } else {
+    await jobs.backgroundQueue.add(() => jobs.reflect());
+    await interaction.editReply("Self-reflection completed.");
+  }
 });
 
 client.on(Events.MessageCreate, async (message) => {
+  const loggedId = logMessage(memoryDb, {
+    channelId: message.channel.id,
+    authorId: message.author.id,
+    authorName: message.member?.displayName || message.author.username,
+    content: message.content,
+    createdAt: message.createdTimestamp,
+  });
+  jobs.enqueueEmbedding(loggedId, message.content);
+  const pending = (pendingByChannel.get(message.channel.id) || 0) + 1;
+  pendingByChannel.set(message.channel.id, pending);
+  if (pending >= 100) {
+    pendingByChannel.set(message.channel.id, 0);
+    jobs.backgroundQueue.add(() => jobs.consolidate(message.channel.id));
+  }
   if (message.author.bot) return;
 
   rememberUserMessage(message.channel.id, message.member?.displayName || message.author.username, message.content);
@@ -106,9 +191,11 @@ client.on(Events.MessageCreate, async (message) => {
       const answer = await askAI({
         prompt: `Someone in Discord said: "${message.content}". React naturally, only if there is a reason to join in. If you would add nothing useful, answer exactly: NO_REPLY.`,
         personality: config.personality,
+        systemContext: renderAliveness(new Date(), lastSpokeAtRef.value),
       });
       if (!/^no[_\s-]?reply$/i.test(answer.trim())) {
-        await message.reply(answer.slice(0, 2000));
+        await deliverReply(message, answer, { lastSpokeAtRef });
+        updateAffinity(message.author.id);
         spontaneousReplies.set(message.channel.id, Date.now());
         rememberBotMessage(message.channel.id, answer);
       }
@@ -147,20 +234,34 @@ client.on(Events.MessageCreate, async (message) => {
             .map((result, index) => `${index + 1}. ${result.title}\n${result.snippet}\n${result.url}`)
             .join("\n\n")}`
           : "No useful search result was found. Answer from reliable general knowledge and be clear that the web search returned no match.";
-        answer = await askAI({ prompt, personality: config.personality, systemContext: context });
+        answer = await askAI({
+          prompt,
+          personality: config.personality,
+          systemContext: `${renderAliveness(new Date(), lastSpokeAtRef.value)}\n${context}`,
+        });
       } else {
         const historyKey = message.channel.id;
         const history = conversations.get(historyKey) || [];
         const factsContextText = factsContext(historyKey);
+        const persistentContext = buildContext(memoryDb, {
+          message: {
+            channelId: message.channel.id,
+            authorId: message.author.id,
+            authorName: message.member?.displayName || message.author.username,
+            content: prompt,
+          },
+          personalityPath: config.personalityPath,
+        });
         answer = await askAI({
           prompt,
           personality: config.personality,
-          systemContext: factsContextText,
+          systemContext: `${renderAliveness(new Date(), lastSpokeAtRef.value)}\n${factsContextText}\n${persistentContext.memoryBlock}`,
           conversation: history.slice(0, -1).slice(-HISTORY_LIMIT),
         });
       }
     }
-    await message.reply(answer.slice(0, 2000));
+    await deliverReply(message, answer, { lastSpokeAtRef });
+    updateAffinity(message.author.id);
     rememberBotMessage(message.channel.id, answer);
   } catch (error) {
     console.error(error);

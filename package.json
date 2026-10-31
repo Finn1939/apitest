@@ -5,14 +5,25 @@
   "description": "A personality-driven Discord chat and research bot",
   "type": "module",
   "scripts": {
-    "start": "node src/index.js",
-    "test": "node --test"
+    "start": "node --max-old-space-size=256 src/index.js",
+    "test": "node --test",
+    "smoke": "node src/smoke.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
   },
   "dependencies": {
+    "@huggingface/transformers": "^4.3.2",
+    "better-sqlite3": "^13.0.3",
+    "@huggingface/transformers": "4.3.2",
+    "better-sqlite3": "13.0.3",
     "discord.js": "^14.25.1",
-    "dotenv": "^17.2.3"
+    "dotenv": "^17.2.3",
+    "openai": "7.47.0",
+    "p-queue": "10.0.0",
+    "sqlite-vec": "^0.1.6",
+    "openai": "^7.47.0",
+    "p-queue": "^10.0.0",
+    "sqlite-vec": "^0.1.9"
   }
 }
