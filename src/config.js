@@ -2,7 +2,7 @@ export const config = {
   discordToken: process.env.DISCORD_TOKEN,
   aiApiKey: process.env.NVIDIA_API_KEY || process.env.AI_API_KEY,
   aiApiUrl: process.env.AI_API_URL || "https://integrate.api.nvidia.com/v1/chat/completions",
-  aiModel: process.env.AI_MODEL || "z-ai/glm-5.3-flash",
+  aiModel: process.env.AI_MODEL || "nvidia/nemotron-3.5-super-vl-120b-a12b",
   personality: process.env.BOT_PERSONALITY ||
     "Friendly, witty, curious, and supportive. Speak naturally, like a real person.",
   prefix: (process.env.BOT_PREFIX || "t").trim(),
