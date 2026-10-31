@@ -36,6 +36,32 @@ export async function completeAI({
         await wait((500 * (2 ** attempt)) + Math.floor(Math.random() * 250));
         continue;
       }
+
+      export async function embedAI(text) {
+        const response = await fetch(`${config.aiApiUrl.replace(/\/chat\/completions\/?$/, "")}/embeddings`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${config.aiApiKey}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: process.env.AI_EMBEDDING_MODEL || "nvidia/nv-embedqa-e5-v5",
+            input: [text],
+            input_type: "passage",
+            encoding_format: "float",
+            truncate: "NONE",
+          }),
+        });
+        if (!response.ok) {
+          throw new Error(`NVIDIA embeddings failed (${response.status}): ${(await response.text()).slice(0, 300)}`);
+        }
+        const data = await response.json();
+        let vector = data.data?.[0]?.embedding;
+        if (!Array.isArray(vector)) throw new Error("NVIDIA embeddings returned no vector");
+        vector = vector.slice(0, 384);
+        const length = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0));
+        return Array.from(vector.map((value) => (length ? value / length : 0)));
+      }
       throw error;
     }
   }

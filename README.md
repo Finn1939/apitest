@@ -46,9 +46,8 @@ To run the memory round-trip smoke test:
 npm run smoke
 ```
 
-RSS is logged every 10 minutes. Keep it below 550 MB; if local embedding usage
-pushes it too high, disable the local embedder and use NVIDIA's `/embeddings`
-endpoint instead.
+Memory embeddings use NVIDIA's `/embeddings` API, so the bot does not load a
+local ONNX model. RSS is logged every 10 minutes and should remain below 550 MB.
 
 ## Usage
 
