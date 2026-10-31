@@ -22,7 +22,6 @@
     "sqlite-vec": "^0.1.9"
   },
   "overrides": {
-    "sharp": "0.32.6",
-    "node-addon-api": "7.1.0"
+    "sharp": "0.32.6"
   }
 }
