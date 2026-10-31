@@ -1,9 +1,21 @@
 import PQueue from "p-queue";
-import { completeAI, embedAI } from "./ai.js";
+import { pipeline } from "@huggingface/transformers";
+import { completeAI } from "./ai.js";
 import { PROMPT_B, PROMPT_C } from "./prompts.js";
 
+let embedder;
+
+async function getEmbedder() {
+  if (!embedder) {
+    embedder = await pipeline("feature-extraction", "Xenova/all-MiniLM-L6-v2", { quantized: true });
+  }
+  return embedder;
+}
+
 export async function embedText(text) {
-  return embedAI(text);
+  const extractor = await getEmbedder();
+  const output = await extractor(text, { pooling: "mean", normalize: true });
+  return Array.from(output.data.slice(0, 384), Number);
 }
 
 export function createJobs(db) {
