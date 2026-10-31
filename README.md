@@ -53,4 +53,4 @@ The bot keeps the latest 30 messages per channel in memory and can use explicitl
 - Mention the bot followed by `remember: ...` to save a fact.
 - Mention the bot followed by `clear memory` to remove that channel's recent history and facts.
 
-Memory resets when the bot restarts.
+Recent history and remembered facts are saved to `data/channel-memory.json`, so they survive restarts. This file is ignored by Git. Channel history is limited to the latest 30 messages, while facts are limited to 100 per channel.

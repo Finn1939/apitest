@@ -4,7 +4,14 @@ import { config, validateConfig } from "./config.js";
 import { parseCommand } from "./commands.js";
 import { askAI } from "./ai.js";
 import { searchWeb } from "./search.js";
-import { HISTORY_LIMIT, addFact, addHistory, parseRememberCommand } from "./memory.js";
+import {
+  HISTORY_LIMIT,
+  addFact,
+  addHistory,
+  loadMemory,
+  parseRememberCommand,
+  saveMemory,
+} from "./memory.js";
 
 validateConfig();
 
@@ -18,9 +25,14 @@ const client = new Client({
   partials: [Partials.Channel],
 });
 
-const conversations = new Map();
-const channelFacts = new Map();
+const storedMemory = loadMemory();
+const conversations = storedMemory.conversations;
+const channelFacts = storedMemory.facts;
 const spontaneousReplies = new Map();
+
+function persistMemory() {
+  saveMemory(conversations, channelFacts);
+}
 
 function randomDelay(minMinutes, maxMinutes) {
   return (minMinutes + Math.random() * (maxMinutes - minMinutes)) * 60_000;
@@ -29,12 +41,14 @@ function randomDelay(minMinutes, maxMinutes) {
 function rememberBotMessage(channelId, answer) {
   const history = conversations.get(channelId) || [];
   conversations.set(channelId, addHistory(history, { role: "assistant", content: answer }));
+  persistMemory();
 }
 
 function rememberUserMessage(channelId, displayName, content) {
   const history = conversations.get(channelId) || [];
   const entry = { role: "user", content: `${displayName}: ${content}` };
   conversations.set(channelId, addHistory(history, entry));
+  persistMemory();
 }
 
 function factsContext(channelId) {
@@ -118,10 +132,12 @@ client.on(Events.MessageCreate, async (message) => {
     if (rememberedFact) {
       const facts = channelFacts.get(message.channel.id) || [];
       channelFacts.set(message.channel.id, addFact(facts, rememberedFact));
+      persistMemory();
       answer = `Got it, I'll remember this in this channel: ${rememberedFact}`;
     } else if (!command && /^(forget everything|clear memory)$/i.test(prompt)) {
       conversations.delete(message.channel.id);
       channelFacts.delete(message.channel.id);
+      persistMemory();
       answer = "Channel memory cleared.";
     } else {
       if (command !== null) {

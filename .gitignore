@@ -1,3 +1,5 @@
 node_modules/
 .env
 npm-debug.log*
+data/channel-memory.json
+data/channel-memory.json.tmp
