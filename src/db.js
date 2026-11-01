@@ -57,7 +57,8 @@ export function createMemoryDb(filePath) {
     CREATE TABLE IF NOT EXISTS relationships (
       user_id TEXT PRIMARY KEY,
       affinity REAL NOT NULL DEFAULT 0,
-      notes TEXT NOT NULL DEFAULT ''
+      notes TEXT NOT NULL DEFAULT '',
+      last_interacted INTEGER NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS journal (
       id INTEGER PRIMARY KEY,
@@ -115,6 +116,13 @@ export function createMemoryDb(filePath) {
       WHERE subject LIKE 'user:%'
     `);
     db.pragma("user_version = 2");
+  }
+  if (db.pragma("user_version", { simple: true }) < 3) {
+    const relColumns = db.prepare("PRAGMA table_info(relationships)").all();
+    if (!relColumns.some((column) => column.name === "last_interacted")) {
+      db.exec("ALTER TABLE relationships ADD COLUMN last_interacted INTEGER NOT NULL DEFAULT 0");
+    }
+    db.pragma("user_version = 3");
   }
   return db;
 }

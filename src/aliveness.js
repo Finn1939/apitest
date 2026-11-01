@@ -1,3 +1,5 @@
+import { config } from "./config.js";
+
 export const ALIVENESS_BLOCK = `=== HOW YOU EXIST (expression layer) ===
 Everything here adjusts HOW you express yourself, never WHO you are. If
 anything conflicts with your personality or your rules, yours win.
@@ -49,15 +51,16 @@ const MOODS = [
 ];
 
 export function buildCurrentState(now = new Date(), lastSpokeAt = Date.now()) {
-  const day = now.toLocaleDateString("en-US", { weekday: "long" });
+  const day = now.toLocaleDateString("en-US", { weekday: "long", timeZone: config.timezone });
   const time = now.toLocaleTimeString("en-US", {
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
+    timeZone: config.timezone,
   });
   const elapsedMinutes = Math.max(0, Math.floor((now.getTime() - lastSpokeAt) / 60_000));
   const mood = MOODS[Math.floor(now.getTime() / 3_600_000) % MOODS.length];
-  return `${day} ${time} · hasn't spoken in ${elapsedMinutes} min · current mood: ${mood}`;
+  return `${day} ${time} ${config.timezoneLabel} · hasn't spoken in ${elapsedMinutes} min · current mood: ${mood}`;
 }
 
 export function renderAliveness(now = new Date(), lastSpokeAt = Date.now()) {

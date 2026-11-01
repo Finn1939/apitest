@@ -58,14 +58,56 @@ function persistMemory() {
 }
 
 function updateAffinity(userId) {
+  const now = Date.now();
   memoryDb.prepare(`
-    INSERT INTO relationships(user_id, affinity) VALUES (?, 0.05)
-    ON CONFLICT(user_id) DO UPDATE SET affinity = affinity + 0.05
-  `).run(userId);
+    INSERT INTO relationships(user_id, affinity, last_interacted) VALUES (?, 0.05, ?)
+    ON CONFLICT(user_id) DO UPDATE SET affinity = affinity + 0.05, last_interacted = ?
+  `).run(userId, now, now);
 }
 
 function randomDelay(minMinutes, maxMinutes) {
   return (minMinutes + Math.random() * (maxMinutes - minMinutes)) * 60_000;
+}
+
+// Short bot-game commands (Karuta etc.) that should never count as conversation.
+const GAME_COMMAND_RE = /^(?:k(?:d|l|g|c|u|i|q|t|v|w|m|a)?|dk|grab|drop|burn|daily|vote|inv(?:entory)?|collection|wishlist|worker|observe)$/;
+
+function isGameCommand(content) {
+  return GAME_COMMAND_RE.test(content.trim().toLowerCase().replace(/[.!]+$/, ""));
+}
+
+// A channel the bot has already learned is a bot-game channel (e.g. Karuta).
+function isLearnedGameChannel(channelId) {
+  const facts = channelFacts.get(channelId) || [];
+  return facts.some((fact) => fact.includes("bot-game channel"));
+}
+
+// Real human conversation per channel in a time window: human messages from
+// memory.db (bot messages are never logged there), minus game commands.
+function realConversationCounts(sinceMs) {
+  const rows = memoryDb.prepare(`
+    SELECT channel_id, content FROM messages
+    WHERE created_at >= ? AND author_id != ?
+  `).all(sinceMs, client.user.id);
+  const counts = new Map();
+  for (const row of rows) {
+    if (isGameCommand(row.content)) continue;
+    counts.set(row.channel_id, (counts.get(row.channel_id) || 0) + 1);
+  }
+  return counts;
+}
+
+// Channels she may open a conversation in: text channels she can send in, with
+// at least three real human messages in the last 24 hours, and not a learned
+// bot-game channel. Dead and game channels are left alone.
+function activeConversationChannels() {
+  const counts = realConversationCounts(Date.now() - 24 * 60 * 60_000);
+  return client.channels.cache.filter((channel) =>
+    channel.isTextBased() &&
+    !channel.isDMBased?.() &&
+    channel.permissionsFor(client.user)?.has("SendMessages") &&
+    !isLearnedGameChannel(channel.id) &&
+    (counts.get(channel.id) || 0) >= 3);
 }
 
 function rememberBotMessage(channelId, answer) {
@@ -119,15 +161,13 @@ async function sendSpontaneousMessage(channel) {
 }
 
 function scheduleSpontaneousMessages() {
-  const channels = client.channels.cache.filter((channel) =>
-    channel.isTextBased() && !channel.isDMBased?.() &&
-    channel.permissionsFor(client.user)?.has("SendMessages"));
-
-  const available = [...channels.values()];
+  const available = [...activeConversationChannels().values()];
   if (available.length) {
     const channel = available[Math.floor(Math.random() * available.length)];
     sendSpontaneousMessage(channel).catch((error) =>
       console.error("Spontaneous chat failed:", error));
+  } else {
+    console.log("No channels with real human activity in the last 24h; skipping spontaneous opener.");
   }
   setTimeout(scheduleSpontaneousMessages, randomDelay(20, 50));
 }
@@ -189,8 +229,7 @@ client.on(Events.MessageCreate, async (message) => {
     return;
   }
 
-  const humanCommand = message.content.trim().toLowerCase().replace(/[.!]+$/, "");
-  const karutaCommand = /^(?:k(?:d|l|g|c|u|i|q|t|v|w|m|a)?|dk|grab|drop|burn|daily|vote|inv(?:entory)?|collection|wishlist|worker|observe)$/.test(humanCommand);
+  const karutaCommand = isGameCommand(message.content);
   if (karutaCommand) {
     const count = (botCommandCountByChannel.get(message.channel.id) || 0) + 1;
     botCommandCountByChannel.set(message.channel.id, count);
@@ -228,6 +267,7 @@ client.on(Events.MessageCreate, async (message) => {
     const lastReply = spontaneousReplies.get(message.channel.id) || 0;
     const canReply = Date.now() - lastReply >= config.spontaneousCooldownMs;
     if (!canReply || message.content.length < 8 || Math.random() >= config.spontaneousChance) return;
+    if (isGameCommand(message.content) || isLearnedGameChannel(message.channel.id)) return;
 
     await message.channel.sendTyping();
     try {

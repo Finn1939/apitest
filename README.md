@@ -24,6 +24,17 @@ is expanded with a local hourly mood, time, and last-speech state. Replies of
 eight words or fewer may be delayed by 1-4 seconds; short reaction-style replies
 may also receive a random emoji reaction.
 
+Spontaneous conversation openers only target channels where real human
+conversation happened in the last 24 hours (at least three human messages that
+are not bot-game commands). Quiet channels and bot-game channels such as
+Karuta are left alone; she never starts conversations there.
+
+She recognizes people: every reply carries who is speaking, how close she
+feels to them (affinity grows with each interaction), when they last really
+talked, and what she knows about them. Facts are keyed by Discord user ID,
+so she still recognizes someone after a rename. Her clock runs on Philippine
+time (set `TIMEZONE` to change it).
+
 ## Persistent memory
 
 All visible messages are stored immediately in `memory.db`, including the bot's

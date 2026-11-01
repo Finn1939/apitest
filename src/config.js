@@ -26,8 +26,11 @@ export const config = {
   dbPath: process.env.DB_PATH || "memory.db",
   adminUserIds: new Set((process.env.ADMIN_USER_IDS || "").split(",").map((id) => id.trim()).filter(Boolean)),
   prefix: (process.env.BOT_PREFIX || "t").trim(),
+  timezone: process.env.TIMEZONE || "Asia/Manila",
   spontaneousChance: Number(process.env.SPONTANEOUS_CHANCE || 0.04),
   spontaneousCooldownMs: Number(process.env.SPONTANEOUS_COOLDOWN_MINUTES || 15) * 60_000,
+  // Optional timezone label shown with the clock (e.g. "PHT" for Asia/Manila).
+  timezoneLabel: process.env.TIMEZONE_LABEL || "PHT",
 };
 
 export function validateConfig() {

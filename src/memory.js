@@ -48,6 +48,15 @@ export function saveMemory(conversations, facts, filePath = MEMORY_FILE) {
 
 const estimatedTokens = (text) => Math.ceil(String(text).length / 4);
 
+// Human-feeling tier for how close the bot is to someone (affinity grows ~0.05 per interaction).
+function affinityTier(affinity) {
+  if (affinity >= 4) return "one of your closest people in this server";
+  if (affinity >= 1.5) return "a regular you are genuinely fond of";
+  if (affinity >= 0.5) return "a familiar face you like talking to";
+  if (affinity >= 0.2) return "an acquaintance you are starting to know";
+  return "someone you barely know yet";
+}
+
 export function truncateTokens(text, maxTokens) {
   const value = String(text || "");
   const maxChars = maxTokens * 4;
@@ -80,8 +89,28 @@ export function buildContext(db, { message, embedVector, personalityPath = "pers
     WHERE subject = ?
     ORDER BY hits DESC, last_seen DESC
   `).all(`user:${message.authorId}`).slice(0, 12);
-  const factsText = truncateTokens(speakerFacts.map(({ fact, confidence }) =>
-    `- [${confidence.toFixed(2)}] ${fact}`).join("\n"), 600);
+  const factsText = truncateTokens(speakerFacts.length
+    ? `What you know about ${message.authorName || "them"} (the speaker):\n${speakerFacts.map(({ fact, confidence }) =>
+    `- [${confidence.toFixed(2)}] ${fact}`).join("\n")}`
+    : "", 600);
+
+  // Who is speaking, how the bot feels about them, and when they last really talked.
+  const speakerName = message.authorName || "Someone";
+  const relationship = db.prepare(
+    "SELECT affinity, last_interacted FROM relationships WHERE user_id = ?"
+  ).get(message.authorId);
+  const speakerLines = [`${speakerName} is talking to you right now.`];
+  if (relationship && (relationship.affinity > 0 || relationship.last_interacted > 0)) {
+    speakerLines.push(`To you they feel like ${affinityTier(relationship.affinity)}.`);
+    if (relationship.last_interacted > 0) {
+      const days = Math.floor((Date.now() - relationship.last_interacted) / 86_400_000);
+      if (days >= 2) speakerLines.push(`You last really talked ${days} day${days === 1 ? "" : "s"} ago.`);
+      else if (days === 1) speakerLines.push("You last really talked yesterday.");
+    }
+  } else {
+    speakerLines.push("You do not know them yet; this may be your first real exchange.");
+  }
+  const speakerText = speakerLines.join(" ");
 
   const recent = db.prepare(`
     SELECT author_name, content FROM messages
@@ -156,7 +185,8 @@ export function buildContext(db, { message, embedVector, personalityPath = "pers
   );
   const memoryBlock = PROMPT_A
     .replace("{{SELF_MODEL}}", selfModel)
-    .replace("{{USER_FACTS}}", factsText || "Nothing remembered yet.")
+    .replace("{{SPEAKER}}", speakerText)
+    .replace("{{USER_FACTS}}", factsText || `You know nothing about ${speakerName} yet.`)
     .replace("{{RELEVANT_MEMORIES}}", relevantText || "No relevant memories.")
     .replace("{{RECENT_MESSAGES}}", recentText || "No recent messages.");
 

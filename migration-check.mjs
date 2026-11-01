@@ -60,8 +60,11 @@ if (vecCount !== 2) throw new Error(`migration failed: expected 2 migrated vecto
 const rekeyed = db.prepare("SELECT subject FROM facts WHERE fact LIKE '%PC%'").get();
 if (rekeyed?.subject !== "user:111") throw new Error(`migration failed: fact re-key produced ${rekeyed?.subject}`);
 const version = db.pragma("user_version", { simple: true });
-if (version !== 2) throw new Error(`migration failed: user_version = ${version}`);
-console.log("Legacy DB migration: OK (guild_id added, 2 vectors moved, facts re-keyed to user:111)");
+if (version !== 3) throw new Error(`migration failed: user_version = ${version}`);
+if (!db.prepare("PRAGMA table_info(relationships)").all().some((c) => c.name === "last_interacted")) {
+  throw new Error("migration failed: relationships.last_interacted missing");
+}
+console.log("Legacy DB migration: OK (guild_id added, 2 vectors moved, facts re-keyed to user:111, last_interacted added)");
 
 // --- New message in the upgraded DB, then full hybrid retrieval ---
 const newId = logMessage(db, {
@@ -81,6 +84,7 @@ const context = buildContext(db, {
   personalityPath: "personality.txt",
 });
 if (!context.memoryBlock.includes("Marco is building a new PC")) throw new Error("retrieval failed: speaker fact not surfaced");
+if (!context.memoryBlock.includes("Marco is talking to you right now")) throw new Error("recognition failed: speaker identity not surfaced");
 if (!context.memoryBlock.includes("pc together") && !context.memoryBlock.includes("pizza")) throw new Error("retrieval failed: old memories not surfaced");
 console.log("Hybrid retrieval after migration: OK (facts + old semantic memories surfaced)");
 console.log(`Estimated context tokens: ${context.estimatedTokens}`);
