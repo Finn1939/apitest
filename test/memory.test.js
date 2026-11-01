@@ -14,6 +14,8 @@ import {
   parseRememberCommand,
   relationshipSummary,
   saveMemory,
+  softDeleteMessageByDiscordId,
+  updateMessageContentByDiscordId,
 } from "../src/memory.js";
 import { createMemoryDb } from "../src/db.js";
 
@@ -458,5 +460,145 @@ test("forgetFacts removes only matching facts for one subject", () => {
   // Empty or missing queries never delete anything.
   assert.deepEqual(forgetFacts(db, "user:u1", "   "), []);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM facts").get().count, 3);
+  rmSync(directory, { recursive: true, force: true });
+});
+
+test("she can see game-bot panels and understand a 'here' pointer", () => {
+  // Replays the live failure: user typed "whl" for OwO, OwO answered with a
+  // HighLow embed panel, user asked "can you help me decide", she replied
+  // "Depends on what it is, tell me first" because the embed was invisible,
+  // then the user held it up with "here @OwO".
+  const directory = mkdtempSync(join(tmpdir(), "apitest-panel-"));
+  const db = createMemoryDb(join(directory, "memory.db"));
+  writeFileSync(join(directory, "personality.txt"), "You are a playful Discord companion.");
+
+  // The OwO panel as she now logs it: content empty, state rendered from the
+  // embed + buttons (this is what index.js stores after renderEmbeds).
+  logMessage(db, {
+    channelId: "casino", authorId: "u1", authorName: "sprite vodka", username: "sprite_vodka",
+    content: "whl", createdAt: Date.now() - 60_000, guildId: "guild-1",
+  });
+  logMessage(db, {
+    channelId: "casino", authorId: "bot-owo", authorName: "OwO", username: "OwO",
+    content: "[HighLow | Current card: Queen of clubs (12)] [choices: Higher (+12,219) / Lower (+1,110) / Same (+10,000) / Cash Out]",
+    createdAt: Date.now() - 50_000, guildId: "guild-1", isBot: true,
+  });
+  logMessage(db, {
+    channelId: "casino", authorId: "u1", authorName: "sprite vodka", username: "sprite_vodka",
+    content: "can you help me decide", createdAt: Date.now() - 40_000, guildId: "guild-1",
+  });
+
+  // Asking for help: the panel must be visible in her recent conversation, so
+  // "tell me first" cannot happen again — she already sees the game.
+  const helping = buildContext(db, {
+    message: { channelId: "casino", authorId: "u1", authorName: "sprite vodka", content: "can you help me decide", guildId: "guild-1" },
+    personalityPath: join(directory, "personality.txt"),
+    botId: "bot-1",
+  });
+  assert.match(helping.memoryBlock, /OwO \[bot\]: \[HighLow \| Current card: Queen of clubs \(12\)\]/);
+  assert.match(helping.memoryBlock, /choices: Higher \(\+12,219\)/);
+
+  // The "here @OwO" pointer: the speaker block must name what is being pointed
+  // at, so she answers about the game instead of being confused.
+  const pointing = buildContext(db, {
+    message: {
+      channelId: "casino", authorId: "u1", authorName: "sprite vodka", content: "here @OwO",
+      guildId: "guild-1", pointingAtBot: "OwO",
+    },
+    personalityPath: join(directory, "personality.txt"),
+    botId: "bot-1",
+  });
+  assert.match(pointing.memoryBlock, /pointing at OwO's message above/);
+  assert.match(pointing.memoryBlock, /not commanding OwO/);
+
+  // Without a pointer, the line must not appear (no leak into normal chat).
+  const plain = buildContext(db, {
+    message: { channelId: "casino", authorId: "u1", authorName: "sprite vodka", content: "so what do you think", guildId: "guild-1" },
+    personalityPath: join(directory, "personality.txt"),
+    botId: "bot-1",
+  });
+  assert.doesNotMatch(plain.memoryBlock, /pointing at/);
+  rmSync(directory, { recursive: true, force: true });
+});
+
+test("edits update the stored message in place and stay searchable", () => {
+  const directory = mkdtempSync(join(tmpdir(), "apitest-edit-"));
+  const db = createMemoryDb(join(directory, "memory.db"));
+  writeFileSync(join(directory, "personality.txt"), "You are a playful Discord companion.");
+  logMessage(db, {
+    channelId: "c1", authorId: "u1", authorName: "Ren", username: "ren",
+    content: "i hate pineapple pizza", createdAt: Date.now(), guildId: "g1",
+    discordId: "discord-msg-1",
+  });
+
+  // The edit replaces the text (plus the (edited) marker the handler adds).
+  assert.equal(updateMessageContentByDiscordId(db, "discord-msg-1", "i love pineapple pizza (edited)"), true);
+  const row = db.prepare("SELECT content FROM messages WHERE discord_id = ?").get("discord-msg-1");
+  assert.equal(row.content, "i love pineapple pizza (edited)");
+
+  // FTS must surface the NEW text, not the stale one (update trigger syncs it).
+  const hit = db.prepare(
+    "SELECT m.content FROM fts_messages JOIN messages m ON m.id = fts_messages.rowid WHERE fts_messages MATCH 'love'",
+  ).get();
+  assert.ok(hit, "edited text must be searchable");
+  assert.match(hit.content, /love pineapple/);
+
+  // Unknown or legacy ids are silently ignored, empty id is a no-op.
+  assert.equal(updateMessageContentByDiscordId(db, "no-such-id", "text"), false);
+  assert.equal(updateMessageContentByDiscordId(db, "", "text"), false);
+  rmSync(directory, { recursive: true, force: true });
+});
+
+test("deletes mark the message instead of erasing the memory", () => {
+  const directory = mkdtempSync(join(tmpdir(), "apitest-delete-"));
+  const db = createMemoryDb(join(directory, "memory.db"));
+  logMessage(db, {
+    channelId: "c1", authorId: "u1", authorName: "Ren", username: "ren",
+    content: "my honest rating of teacher-san", createdAt: Date.now(), guildId: "g1",
+    discordId: "discord-msg-2",
+  });
+
+  // Soft delete: text kept, marker appended — "I saw you delete that" material.
+  assert.equal(softDeleteMessageByDiscordId(db, "discord-msg-2"), true);
+  const row = db.prepare("SELECT content FROM messages WHERE discord_id = ?").get("discord-msg-2");
+  assert.match(row.content, /\(deleted\)$/);
+
+  // Idempotent: the second delete event never double-marks.
+  assert.equal(softDeleteMessageByDiscordId(db, "discord-msg-2"), false);
+  assert.equal((db.prepare("SELECT content FROM messages WHERE discord_id = ?").get("discord-msg-2").content.match(/\(deleted\)/g) || []).length, 1);
+
+  // Unknown ids and empty ids are no-ops.
+  assert.equal(softDeleteMessageByDiscordId(db, "nope"), false);
+  assert.equal(softDeleteMessageByDiscordId(db, ""), false);
+  rmSync(directory, { recursive: true, force: true });
+});
+
+test("reactions on her messages appear in the speaker block", () => {
+  const directory = mkdtempSync(join(tmpdir(), "apitest-reacts-"));
+  const db = createMemoryDb(join(directory, "memory.db"));
+  writeFileSync(join(directory, "personality.txt"), "You are a playful Discord companion.");
+  logMessage(db, {
+    channelId: "c1", authorId: "u1", authorName: "Ren", username: "ren",
+    content: "sup", createdAt: Date.now(), guildId: "g1",
+  });
+
+  const withReacts = buildContext(db, {
+    message: {
+      channelId: "c1", authorId: "u1", authorName: "Ren", content: "sup", guildId: "g1",
+      reactionsSeen: "❤️ from Ren, sprite vodka; 😂 from Ren",
+    },
+    personalityPath: join(directory, "personality.txt"),
+    botId: "bot-1",
+  });
+  assert.match(withReacts.memoryBlock, /❤️ from Ren, sprite vodka; 😂 from Ren/);
+  assert.match(withReacts.memoryBlock, /You notice these/);
+
+  // Without reactions: nothing leaks.
+  const plain = buildContext(db, {
+    message: { channelId: "c1", authorId: "u1", authorName: "Ren", content: "sup", guildId: "g1" },
+    personalityPath: join(directory, "personality.txt"),
+    botId: "bot-1",
+  });
+  assert.doesNotMatch(plain.memoryBlock, /Reactions people/);
   rmSync(directory, { recursive: true, force: true });
 });

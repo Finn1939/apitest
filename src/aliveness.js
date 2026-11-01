@@ -68,16 +68,16 @@ export function renderAliveness(now = new Date(), lastSpokeAt = Date.now()) {
   return ALIVENESS_BLOCK.replace("{{CURRENT_STATE}}", () => buildCurrentState(now, lastSpokeAt));
 }
 
-export async function deliverReply(message, answer, { lastSpokeAtRef, spontaneous = false } = {}) {
+export async function deliverReply(message, answer, { lastSpokeAtRef, spontaneous = false, onSent } = {}) {
   const text = answer.slice(0, 2000);
   const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
   if (wordCount <= 8) {
     await new Promise((resolve) => setTimeout(resolve, 1000 + Math.random() * 3000));
   }
-  if (spontaneous) {
-    await message.channel.send(text);
-  } else {
-    await message.reply(text);
+  const sent = spontaneous ? await message.channel.send(text) : await message.reply(text);
+  // Hand back the sent Message so callers can track its id (reactions).
+  if (onSent) {
+    try { onSent(sent); } catch { /* tracking must never break delivery */ }
   }
   if (lastSpokeAtRef) lastSpokeAtRef.value = Date.now();
 
@@ -97,11 +97,16 @@ export async function deliverReply(message, answer, { lastSpokeAtRef, spontaneou
 // dupCheck(text) -> Promise<string|null>: called once with the finished text.
 // If it resolves to a non-empty string, that string replaces the streamed text
 // in the message (used to swap out a verbatim repeat of her previous reply).
-export async function deliverStreamedReply(message, produce, { lastSpokeAtRef, dupCheck } = {}) {
+export async function deliverStreamedReply(message, produce, { lastSpokeAtRef, dupCheck, onSent } = {}) {
   let sent = null;
   try {
     await message.channel.sendTyping();
     sent = await message.reply("…");
+    // Tracking from the first moment the message exists, so reactions that
+    // arrive while she is still streaming count too.
+    if (onSent) {
+      try { onSent(sent); } catch { /* tracking must never break delivery */ }
+    }
     let buffer = "";
     let lastEdit = 0;
     const finalText = await produce((delta) => {

@@ -40,12 +40,47 @@ export function replyAuthorsAgree(authorIds) {
 // match the ENTIRE message, so "my balance is off" stays conversation. Without
 // these, game traffic was counted as human conversation and the engagement
 // window guaranteed her a reply to every command aimed at OwO or Karuta.
-export const GAME_COMMAND_RE = /^(?:k(?:d|l|g|c|u|i|q|t|v|w|m|a)?|dk|grab|drop|burn|daily|vote|inv(?:entory)?|collection|wishlist|worker|observe|bal(?:ance)?|cash|lb|leaderboard|profile|marry|divorce|ship|waifu|hxh|trivia|lottery|work|crime|slots?)$/;
-export const GAME_COMMAND_ARG_RE = /^(?:wcf|cf|bet|slot|slots)\s+(?:\d+|all|half|quarter|max)$/;
+export const GAME_COMMAND_RE = /^(?:k(?:d|l|g|c|u|i|q|t|v|w|m|a)?|dk|grab|drop|burn|daily|vote|inv(?:entory)?|collection|wishlist|worker|observe|bal(?:ance)?|cash|lb|leaderboard|profile|marry|divorce|ship|waifu|hxh|trivia|lottery|work|crime|slots?|whl|hl|highlow)$/;
+export const GAME_COMMAND_ARG_RE = /^(?:wcf|cf|bet|slot|slots|whl|hl|highlow)\s+(?:\d+|all|half|quarter|max)$/;
+
+// Game-command words the AI judgment layer learned at runtime ("whl" once had
+// to be hand-added; now she can recognize the next one herself). Populated by
+// index.js at boot from the learned_commands table and extended live. A word
+// only ever matches a whole message, or itself plus a wager ("gacha 500") —
+// so "gacha time everyone" stays conversation.
+export const learnedGameCommands = new Set();
 
 export function isGameCommand(content) {
   const text = String(content || "").trim().toLowerCase().replace(/[.!]+$/, "");
-  return GAME_COMMAND_RE.test(text) || GAME_COMMAND_ARG_RE.test(text);
+  if (GAME_COMMAND_RE.test(text) || GAME_COMMAND_ARG_RE.test(text)) return true;
+  if (learnedGameCommands.has(text)) return true;
+  if (learnedGameCommands.size) {
+    const [head, wager] = text.split(/\s+/);
+    if (wager && learnedGameCommands.has(head) && /^(?:\d+|all|half|quarter|max)$/.test(wager)) return true;
+  }
+  return false;
+}
+
+// One readable line of the reactions recently left on her messages. Entries
+// that the judgment layer interpreted carry their meaning inline — "❤️ from
+// Ren — flirty teasing" — so her replies can lean on WHY it felt nice, not
+// just that an emoji happened. Duplicate (emoji, person, meaning) events
+// collapse; at most 8 shown.
+export function formatReactionSummary(entries) {
+  const seen = new Set();
+  const parts = [];
+  for (const entry of entries || []) {
+    if (!entry?.emoji || !entry?.userName) continue;
+    const key = `${entry.emoji}|${entry.userName}|${entry.meaning || ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (parts.length < 8) {
+      parts.push(entry.meaning
+        ? `${entry.emoji} from ${entry.userName} — ${entry.meaning}`
+        : `${entry.emoji} from ${entry.userName}`);
+    }
+  }
+  return parts.join("; ");
 }
 
 // --- Verbatim self-repetition guard ---------------------------------------
@@ -131,6 +166,17 @@ export function detectIntimacy(text) {
     if (match) return { weight: 0.4, signal: match[0] };
   }
   return null;
+}
+
+// "here" / "this one" / "look" while pinging another bot: the message is a
+// POINTER at that bot's output above (a game panel, a result), not a command
+// and not small talk. Lets her connect "here" to the OwO HighLow panel the
+// user is holding up for her to see. "here's my plan…" must NOT match, so a
+// trailing apostrophe right after the deictic word disqualifies it.
+const POINTING_RE = /^(?:here|this|that|dis|look(?:\s+at)?|check\s+(?:this|that|dis)|see\s+(?:this|that)|peep\s+(?:this|that|dis))\b(?!['’])/i;
+export function isPointingAtBot(content) {
+  const text = String(content || "").toLowerCase().trim();
+  return text.length <= 80 && POINTING_RE.test(text);
 }
 
 // Resolving a reply target can cost a Discord REST call, so only do it when

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { detectIntimacy, isAddressedToBot, isDuplicateReply, isGameCommand, isReplyIdentityQuestion, normalizeReplyForDup, pickIdentityAnswer, replyAuthorsAgree, shouldResolveReplyTarget, SPONTANEOUS_OPENERS } from "../src/replies.js";
+import { detectIntimacy, isAddressedToBot, isDuplicateReply, isGameCommand, isPointingAtBot, isReplyIdentityQuestion, normalizeReplyForDup, pickIdentityAnswer, replyAuthorsAgree, shouldResolveReplyTarget, SPONTANEOUS_OPENERS } from "../src/replies.js";
 
 test("recognizes follow-up reply identity questions", () => {
   assert.equal(isReplyIdentityQuestion("how about now?"), true);
@@ -125,4 +125,34 @@ test("intimacy signals are detected conservatively", () => {
   for (const text of ["we hate you", "wcf 655", "balance", "k", "i love this song", "family time", "gm guys", "idc", "how about my balance", "the lab you were in", "i need you to help me with this", "can you help me with slots"]) {
     assert.equal(detectIntimacy(text), null, `must NOT register as intimacy: ${text}`);
   }
+});
+
+test("highlow game commands never count as conversation", () => {
+  // The live failure: "whl" was for OwO, but the engagement window made her
+  // reply to it as if it were chat. "whl", "hl" and wagers must all be game
+  // traffic; near-words like "whale" must stay conversation.
+  assert.equal(isGameCommand("whl"), true);
+  assert.equal(isGameCommand("WHL"), true);
+  assert.equal(isGameCommand("hl"), true);
+  assert.equal(isGameCommand("highlow"), true);
+  assert.equal(isGameCommand("whl 1000"), true);
+  assert.equal(isGameCommand("hl all"), true);
+  assert.equal(isGameCommand("whale"), false);
+  assert.equal(isGameCommand("whls"), false);
+});
+
+test("short deictic messages pointing at another bot are recognized", () => {
+  // "here @OwO" style pointers: she must connect these to the bot's message
+  // above instead of asking "tell me first".
+  assert.equal(isPointingAtBot("here"), true);
+  assert.equal(isPointingAtBot("here @OwO"), true);
+  assert.equal(isPointingAtBot("this"), true);
+  assert.equal(isPointingAtBot("this one"), true);
+  assert.equal(isPointingAtBot("dis"), true);
+  assert.equal(isPointingAtBot("look at this"), true);
+  assert.equal(isPointingAtBot("check this @TEST."), true);
+  // Not pointers: contractions, questions, longer chatter.
+  assert.equal(isPointingAtBot("here's my plan for the weekend"), false);
+  assert.equal(isPointingAtBot("where are you going"), false);
+  assert.equal(isPointingAtBot("there once was a man from nantucket who really loved to fish every single morning"), false);
 });

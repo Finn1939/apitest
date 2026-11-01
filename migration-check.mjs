@@ -59,14 +59,25 @@ if (vecCount !== 2) throw new Error(`migration failed: expected 2 migrated vecto
 const rekeyed = db.prepare("SELECT subject FROM facts WHERE fact LIKE '%PC%'").get();
 if (rekeyed?.subject !== "user:111") throw new Error(`migration failed: fact re-key produced ${rekeyed?.subject}`);
 const version = db.pragma("user_version", { simple: true });
-if (version !== 6) throw new Error(`migration failed: user_version = ${version}`);
+if (version !== 8) throw new Error(`migration failed: user_version = ${version}`);
 if (!db.prepare("PRAGMA table_info(relationships)").all().some((c) => c.name === "last_interacted")) {
   throw new Error("migration failed: relationships.last_interacted missing");
 }
 if (!db.prepare("PRAGMA table_info(relationships)").all().some((c) => c.name === "romance")) {
   throw new Error("migration failed: relationships.romance missing");
 }
-console.log("Legacy DB migration: OK (guild_id + username + is_bot added, 2 vectors moved, facts re-keyed to user:111, last_interacted + romance added)");
+if (!db.prepare("PRAGMA table_info(messages)").all().some((c) => c.name === "discord_id")) {
+  throw new Error("migration failed: messages.discord_id missing");
+}
+const discordIndex = db.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_messages_discord_id'").get();
+if (!discordIndex) throw new Error("migration failed: discord_id index missing");
+const learnedTable = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'learned_commands'").get();
+if (!learnedTable) throw new Error("migration failed: learned_commands table missing");
+db.prepare("INSERT OR REPLACE INTO learned_commands(command, learned_at) VALUES ('whl', ?)").run(Date.now());
+if (db.prepare("SELECT command FROM learned_commands").all().length !== 1) {
+  throw new Error("migration failed: learned_commands not writable");
+}
+console.log("Legacy DB migration: OK (guild_id + username + is_bot + discord_id added, 2 vectors moved, facts re-keyed to user:111, last_interacted + romance + learned_commands added)");
 
 // --- New message in the upgraded DB, then full hybrid retrieval ---
 const newId = logMessage(db, {

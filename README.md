@@ -32,6 +32,73 @@ conversation happened in the last 24 hours (at least three human messages that
 are not bot-game commands). Quiet channels and bot-game channels such as
 Karuta are left alone; she never starts conversations there.
 
+Game-bot panels are visible to her: when another bot answers with embeds and
+buttons (OwO's HighLow card, for example), the panel is flattened into
+readable text in her memory, so "can you help me decide?" gets a real answer
+about the actual card and payouts. A short pointer like "here @OwO" is
+understood as showing her that bot's message above, not as a command for that
+bot. HighLow-style commands (`whl`, `hl`, `highlow`) are treated as game
+traffic and never answered as conversation.
+
+She sees the whole conversation, not just plain text:
+
+- **Images** — when someone sends her a photo while talking to her, she
+  actually looks at it (the model is vision-language capable). Photos are
+  downscaled locally with sharp before being sent, so payloads stay small and
+  it costs no extra API request. Her description of the image is stored as
+  part of the conversation, which is how she remembers what she saw.
+- **Attachments, stickers, polls** — everything she cannot open (videos,
+  voice messages, files) is still recorded as readable metadata:
+  `[attached: voice message (audio/ogg, 88 KB, 14s)]`, `[sticker: Sadge]`,
+  `[poll: Movie night? — options: Yes, No]`.
+- **Emoji reactions** — reactions on her messages are noticed and included in
+  her next reply's context. What each reaction meant is decided by a small AI
+  judgment call (see below), so a heart on a flirty joke lands differently
+  than a heart on homework help — both on the romance axis and in how she
+  words her next reply.
+- **Edited and deleted messages** — when someone edits a message, her stored
+  copy becomes the current text (marked `(edited)`, so she can tease about
+  it); deletions never erase what she saw — the memory is kept and marked
+  `(deleted)`. Game-bot panels that edit in place (a HighLow card changing)
+  keep her view current too.
+
+### AI judgment layer
+
+Beyond composing replies, the same model makes small structured judgments
+(strict-JSON in, validated out) that make her decisions smarter than regexes:
+
+- **Reaction interpretation** — reactions on her messages queue up and are
+  interpreted in one batched call, with the message text they landed on, the
+  recent channel conversation, and what she knows about whoever reacted. The
+  result sets how much romance (if any) the reaction carries, whether she
+  mirrors a small emoji back onto her own message, and a short note that
+  becomes a durable memory — so the diary remembers *why* the heart felt
+  nice, not just that it happened. Meanings surface in her reply context
+  ("❤️ from Ren — flirty teasing").
+- **Game-channel spectating** — when a game bot posts a panel with a
+  win/loss-worthy signal (jackpot, bankruptcy, all-in), she occasionally
+  asks whether the moment deserves ONE spectator comment — teasing an epic
+  loss, celebrating a big win. A per-channel cooldown and a probability gate
+  keep it rare; the judgment can always decide to stay silent.
+- **Command learning** — the same game judgment can recognize the command
+  word that triggered a bot's panel ("whl", "daily"), validate it strictly
+  (short alphanumeric, provably the start of the human message right before
+  the panel, never a pointer word like "here"), and persist it to the
+  `learned_commands` table. The game-traffic filter grows on its own — the
+  "whl" fix, automated for the next game bot.
+
+Judgment calls share the 3-key pool with replies but have their own sliding
+budget (default 10 calls/min — about 8% of 120 RPM), so live replies always
+keep priority. Every failure mode — budget spent, API down, malformed JSON,
+  wrong shape — falls back to the previous deterministic rules; analysis
+  enhances behavior, it never gates it. `/status` shows how many judgments
+  ran and how many fell back.
+
+All judgment settings are optional environment variables with working
+defaults: `ANALYSIS_ENABLED` (`false` disables the whole layer, reactions fall
+back to the flat heart rule), `ANALYSIS_MAX_PER_MIN`,
+`REACTION_FLUSH_MINUTES`, `GAME_WATCH_CHANCE`, `GAME_WATCH_COOLDOWN_MINUTES`.
+
 She recognizes people: every reply carries who is speaking (display name and
 @username), how close she feels to them (affinity grows with each interaction),
 when they last really talked, and what she knows about them. Facts are keyed

@@ -15,13 +15,16 @@ import {
   saveMemory,
   buildContext,
   logMessage,
+  softDeleteMessageByDiscordId,
+  updateMessageContentByDiscordId,
 } from "./memory.js";
 import { createMemoryDb } from "./db.js";
 import { createJobs, embedText } from "./jobs.js";
 import { streamReply } from "./llm.js";
 import { deliverReply, deliverStreamedReply, renderAliveness } from "./aliveness.js";
-import { renderDiscordMentions } from "./render.js";
-import { detectIntimacy, isAddressedToBot, isDuplicateReply, isGameCommand, isReplyIdentityQuestion, pickIdentityAnswer, shouldResolveReplyTarget, SPONTANEOUS_OPENERS } from "./replies.js";
+import { renderDiscordMentions, renderEmbeds, renderButtons, renderMediaExtras, visionUserContent } from "./render.js";
+import { createAnalyst } from "./analysis.js";
+import { detectIntimacy, formatReactionSummary, isAddressedToBot, isDuplicateReply, isGameCommand, isPointingAtBot, isReplyIdentityQuestion, learnedGameCommands, pickIdentityAnswer, shouldResolveReplyTarget, SPONTANEOUS_OPENERS } from "./replies.js";
 
 validateConfig();
 
@@ -31,8 +34,12 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages,
+    // Reactions are how people answer her without typing; edits and deletes are
+    // how conversations get revised. Seeing them all is part of "being there".
+    GatewayIntentBits.GuildMessageReactions,
+    GatewayIntentBits.DirectMessageReactions,
   ],
-  partials: [Partials.Channel],
+  partials: [Partials.Channel, Partials.Message, Partials.Reaction, Partials.User],
   makeCache: Options.cacheWithLimits({
     MessageManager: 25,
     UserManager: 50,
@@ -57,6 +64,17 @@ const botCommandCountByChannel = new Map();
 const engagedConversations = new Map();
 const memoryDb = createMemoryDb(config.dbPath);
 const jobs = createJobs(memoryDb);
+// AI judgment layer: reaction meanings, game-channel spectating, command
+// learning. Shares the key pool with replies but with its own tight budget;
+// every failure falls back to the deterministic rules that ran before it.
+const analyst = createAnalyst({
+  completeAI,
+  maxPerMinute: config.analysisMaxPerMinute,
+  persona: config.personality.slice(0, 800),
+});
+for (const { command } of memoryDb.prepare("SELECT command FROM learned_commands").all()) {
+  learnedGameCommands.add(command);
+}
 let pendingByChannel = new Map();
 const lastSpokeAtRef = { value: Date.now() };
 
@@ -66,6 +84,238 @@ setInterval(() => {
 
 function persistMemory() {
   saveMemory(conversations, channelFacts);
+}
+
+// --- Vision -------------------------------------------------------------------
+// The model is vision-language capable, so when someone sends her an image
+// while talking to her, she actually looks at it. sharp (bundled with the
+// transformers dependency) downscales photos to a small JPEG — a 4 MB phone
+// photo becomes ~150 KB, keeping payloads tiny and memory flat. If sharp is
+// unavailable, only small originals pass through.
+let sharpModule = null;
+try {
+  sharpModule = (await import("sharp")).default;
+} catch {
+  // Optional: text and metadata still work without vision downscaling.
+}
+
+const VISION_MAX_IMAGES = 2;
+const VISION_MAX_BYTES = 8 * 1024 * 1024;
+
+async function toDataUrl(buffer, contentType) {
+  if (sharpModule) {
+    const out = await sharpModule(buffer)
+      .rotate() // respect EXIF orientation
+      .resize(1024, 1024, { fit: "inside", withoutEnlargement: true })
+      .jpeg({ quality: 80 })
+      .toBuffer();
+    return `data:image/jpeg;base64,${out.toString("base64")}`;
+  }
+  if (buffer.length <= 2 * 1024 * 1024) {
+    return `data:${contentType};base64,${buffer.toString("base64")}`;
+  }
+  return null;
+}
+
+// Only images from people actually talking to her are fetched — never from
+// bot spam, never from passive channel traffic. Same request count as a
+// normal reply; the images ride along inside it.
+async function collectVisionImages(message) {
+  const images = [];
+  for (const attachment of message.attachments.values()) {
+    if (images.length >= VISION_MAX_IMAGES) break;
+    const type = String(attachment.contentType || "");
+    if (!type.startsWith("image/")) continue;
+    if (attachment.size > VISION_MAX_BYTES) continue;
+    try {
+      const response = await fetch(attachment.url);
+      if (!response.ok) continue;
+      const dataUrl = await toDataUrl(Buffer.from(await response.arrayBuffer()), type);
+      if (dataUrl) images.push(dataUrl);
+    } catch (error) {
+      console.warn("Could not load an image for vision:", error.message);
+    }
+  }
+  return images;
+}
+
+// --- Reactions on her messages ------------------------------------------------
+// Reaction events carry only ids, so her recent sent messages are tracked
+// (capped) — matching reactions to her needs zero API calls. The stored meta
+// keeps the message text (what the reaction landed on — needed to interpret
+// it) and the Message object itself (so she can mirror an emoji back onto it).
+const sentMessageMetaById = new Map();
+function trackSentMessage(message, content = "") {
+  if (!message?.id) return;
+  sentMessageMetaById.set(message.id, {
+    channelId: message.channel?.id || "",
+    content: String(content || "").slice(0, 280),
+    message,
+  });
+  if (sentMessageMetaById.size > 60) {
+    for (const oldest of sentMessageMetaById.keys()) { sentMessageMetaById.delete(oldest); break; } // Map keeps insertion order
+  }
+}
+
+// Streamed replies are tracked the moment they exist, but their real text
+// arrives later — fill it in once the stream has finished.
+function noteSentMessageContent(messageId, content) {
+  const meta = sentMessageMetaById.get(messageId);
+  if (meta) meta.content = String(content || "").slice(0, 280);
+}
+
+// Ephemeral social signals: reactions she received in the last 30 minutes.
+// Not database rows — reactions are feelings of the moment, not history.
+// Each record gains a `meaning` once the judgment layer interprets it, which
+// then shows up in her reply context ("❤️ from Ren — flirty teasing").
+const reactionsByChannel = new Map();
+const HEART_REACT_RE = /❤|💕|💖|💗|💓|💘|🥰|😍|💌|😘|heart|love|labyu/i;
+
+function recordReaction(channelId, { emoji, userName }) {
+  if (!channelId || !emoji) return null;
+  let list = reactionsByChannel.get(channelId);
+  if (!list) {
+    list = [];
+    reactionsByChannel.set(channelId, list);
+  }
+  const record = { emoji, userName, at: Date.now(), meaning: "" };
+  list.push(record);
+  if (list.length > 40) list.splice(0, list.length - 40);
+  return record;
+}
+
+function recentReactionSummary(channelId) {
+  const list = (reactionsByChannel.get(channelId) || [])
+    .filter((entry) => Date.now() - entry.at < 30 * 60_000);
+  return list.length ? formatReactionSummary(list) : null;
+}
+
+// --- AI reaction interpretation ---------------------------------------------
+// Instead of a flat "heart = +0.4", reactions queue per channel and are
+// interpreted in ONE batched judgment call: a heart on her flirty joke lands
+// differently than a heart on homework help. Any failure (budget spent, API
+// down, bad JSON) falls back to the old flat rule, so this can never make
+// her dumber — only smarter on average.
+const reactionQueueByChannel = new Map();
+const reactionFlushTimers = new Map();
+const mirroredReactionMessageIds = new Set();
+
+function queueReactionForAnalysis(channelId, entry) {
+  let queue = reactionQueueByChannel.get(channelId);
+  if (!queue) {
+    queue = [];
+    reactionQueueByChannel.set(channelId, queue);
+  }
+  queue.push(entry);
+  if (queue.length > 20) queue.splice(0, queue.length - 20);
+  if (queue.length >= 8) {
+    flushReactions(channelId);
+    return;
+  }
+  if (!reactionFlushTimers.has(channelId)) {
+    reactionFlushTimers.set(channelId, setTimeout(() => flushReactions(channelId), config.reactionFlushMs));
+  }
+}
+
+// The pre-analysis rule, kept verbatim as the fallback path.
+function fallbackHeartRule(entries) {
+  for (const entry of entries) {
+    if (HEART_REACT_RE.test(entry.emoji)) {
+      updateRomance(entry.userId, { weight: 0.4, signal: `react:${entry.emoji}` });
+    }
+  }
+}
+
+// She mirrors one emoji back onto her own message — at most once per message,
+// so a pile of hearts cannot stack five emoji onto it.
+function mirrorReaction(messageId, emoji) {
+  if (mirroredReactionMessageIds.has(messageId)) return;
+  const meta = sentMessageMetaById.get(messageId);
+  mirroredReactionMessageIds.add(messageId);
+  if (mirroredReactionMessageIds.size > 40) {
+    for (const oldest of mirroredReactionMessageIds.keys()) { mirroredReactionMessageIds.delete(oldest); break; }
+  }
+  if (meta?.message?.react) {
+    meta.message.react(emoji).catch(() => { /* mirroring is best-effort */ });
+  }
+}
+
+async function flushReactions(channelId) {
+  const timer = reactionFlushTimers.get(channelId);
+  if (timer) {
+    clearTimeout(timer);
+    reactionFlushTimers.delete(channelId);
+  }
+  const queue = reactionQueueByChannel.get(channelId) || [];
+  if (!queue.length) return;
+  const batch = queue.splice(0, 10);
+  if (queue.length) {
+    reactionFlushTimers.set(channelId, setTimeout(() => flushReactions(channelId), 15_000));
+  }
+  try {
+    // Group the batch by which of her messages was reacted to, so the
+    // judgment sees the text the reaction landed on.
+    const groups = new Map();
+    for (const entry of batch) {
+      if (!groups.has(entry.messageId)) {
+        groups.set(entry.messageId, {
+          herText: sentMessageMetaById.get(entry.messageId)?.content || "",
+          reactions: [],
+        });
+      }
+      groups.get(entry.messageId).reactions.push({ emoji: entry.emoji, who: entry.userName });
+    }
+    const peopleNotes = [...new Set(batch.map((entry) => entry.userId))].map((userId) => {
+      const row = memoryDb.prepare(
+        "SELECT affinity, romance, last_interacted FROM relationships WHERE user_id = ?",
+      ).get(userId);
+      const name = displayNameFor(userId);
+      if (!row) return `- ${name}: no bond yet`;
+      const summary = relationshipSummary(row);
+      const romanceBit = summary.romanceLabel ? `; romance — she ${summary.romanceLabel.replace("you", "them")}` : "";
+      return `- ${name}: friendship — ${summary.friendLabel}${romanceBit}`;
+    }).join("\n");
+    const results = await analyst.interpretReactions({
+      groups: [...groups.values()],
+      contextLines: recentHumanLines(channelId, 6),
+      peopleNotes,
+    });
+    if (!results) {
+      fallbackHeartRule(batch);
+      return;
+    }
+    const notedUsers = new Set();
+    for (let index = 0; index < batch.length; index += 1) {
+      const entry = batch[index];
+      const result = results[index];
+      if (!result) continue;
+      // The meaning becomes part of her live context for the next half hour.
+      if (entry.recordRef) entry.recordRef.meaning = result.meaning;
+      if (result.romanceWeight > 0) {
+        // The AI's weight replaces the flat 0.4; the daily budget, per-signal
+        // dedup and deep-growth slowdown all still apply.
+        updateRomance(entry.userId, { weight: result.romanceWeight, signal: `react:${entry.emoji}` });
+      }
+      if (result.reactBack && result.reactEmoji) mirrorReaction(entry.messageId, result.reactEmoji);
+      // What the moment meant becomes a durable fact — the diary and future
+      // replies remember WHY the heart felt nice, not just that it happened.
+      const noteText = result.note || (result.meaning ? `Reacted ${entry.emoji} — ${result.meaning}` : "");
+      if (noteText && result.romanceWeight >= 0.3 && !notedUsers.has(entry.userId)) {
+        notedUsers.add(entry.userId);
+        const subject = `user:${entry.userId}`;
+        const existing = memoryDb.prepare("SELECT id FROM facts WHERE subject = ? AND fact = ?").get(subject, noteText);
+        if (!existing) {
+          const now = Date.now();
+          memoryDb.prepare(
+            "INSERT INTO facts(subject, fact, confidence, first_seen, last_seen) VALUES (?, ?, ?, ?, ?)",
+          ).run(subject, noteText, 0.7, now, now);
+        }
+      }
+    }
+  } catch (error) {
+    console.warn("Reaction analysis failed:", error.message);
+    fallbackHeartRule(batch);
+  }
 }
 
 function updateAffinity(userId) {
@@ -212,15 +462,20 @@ async function resolveReplyTarget(message) {
       console.warn(`Reply author metadata disagrees with the message reference for message ${message.id}; refusing to guess.`);
       return null;
     }
+    // The referenced message may be a bot panel whose content is empty — the
+    // game state is all in embeds/buttons. Render those so replying "here" to
+    // an OwO panel shows her the actual card and choices.
+    const refPanel = [renderEmbeds(ref.embeds), renderButtons(ref.components)].filter(Boolean).join(" ");
+    const refText = renderDiscordMentions(ref.content || "", {
+      users: ref.mentions?.users,
+      roles: ref.mentions?.roles,
+      channels: ref.mentions?.channels,
+    });
     return {
       authorName: ref.member?.displayName || ref.author.globalName || ref.author.username || "someone",
       authorId: ref.author.id,
       isSelf: ref.author.id === client.user.id,
-      content: renderDiscordMentions(ref.content || "", {
-        users: ref.mentions?.users,
-        roles: ref.mentions?.roles,
-        channels: ref.mentions?.channels,
-      }).replace(/\s+/g, " ").trim().slice(0, 200),
+      content: `${refText}${refPanel ? ` ${refPanel}` : ""}`.replace(/\s+/g, " ").trim().slice(0, 320),
       ageMs: Math.max(0, message.createdTimestamp - (ref.createdTimestamp || message.createdTimestamp)),
     };
   }
@@ -311,6 +566,16 @@ function recentHumanLines(channelId, limit = 8) {
   return rows.map((row) => `${row.author_name}: ${row.content}`).join("\n");
 }
 
+// Recent lines from everyone — humans AND bots, labels included. This is the
+// spectator's view of a game channel: commands, panels, results in order.
+function recentChannelLines(channelId, limit = 8) {
+  const rows = memoryDb.prepare(`
+    SELECT author_name, content, is_bot FROM messages
+    WHERE channel_id = ? ORDER BY id DESC LIMIT ?
+  `).all(channelId, limit).reverse();
+  return rows.map((row) => row.is_bot ? `${row.author_name} [bot]: ${row.content}` : `${row.author_name}: ${row.content}`).join("\n");
+}
+
 // Composed per message: a rotating opener angle (so openings stop feeling
 // samey) plus the channel's recent human conversation as hook-in context.
 function spontaneousPromptFor(channelId) {
@@ -341,6 +606,7 @@ async function sendSpontaneousMessage(channel) {
   await deliverReply({ channel, react: async () => {} }, answer, {
     lastSpokeAtRef,
     spontaneous: true,
+    onSent: (sent) => trackSentMessage(sent, answer),
   });
   spontaneousReplies.set(channel.id, Date.now());
   rememberBotMessage(channel.id, answer);
@@ -515,12 +781,14 @@ client.on(Events.InteractionCreate, async (interaction) => {
     const model = memoryDb.prepare("SELECT updated_at FROM self_model WHERE id = 1").get();
     const ping = client.ws.ping >= 0 ? `${Math.round(client.ws.ping)}ms` : "measuring…";
     const rss = process.memoryUsage().rss / 1024 / 1024;
+    const analysis = analyst.stats;
     await interaction.editReply([
       `**${botName} status**`,
       `Uptime: ${formatUptime(process.uptime())} | Ping: ${ping}`,
       `Model: \`${config.aiModel}\``,
       `Memory: ${Math.round(rss)} MB RSS`,
       `Brain: ${messages} messages, ${facts} facts, ${journal} diary entries`,
+      `Analysis: ${analysis.calls} AI judgments, ${analysis.fallbacks} fell back to rules`,
       `Self-image refreshed ${Math.max(1, Math.round((Date.now() - model.updated_at) / 36e5))}h ago`,
     ].join("\n"));
   } else if (name === "diary") {
@@ -608,23 +876,185 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
+// --- Edits, deletes, reactions: witnessing the whole conversation ----------
+
+// A message was edited: her stored copy becomes the CURRENT text (marked), so
+// she never quotes a version the author already fixed. Bot panels (OwO's
+// HighLow card changes) are updated too, outside learned game channels.
+client.on(Events.MessageUpdate, async (_oldMessage, incoming) => {
+  try {
+    if (!incoming?.id) return;
+    let edited = incoming;
+    if (edited.partial) {
+      edited = await edited.fetch().catch(() => null);
+      if (!edited) return;
+    }
+    const authorId = edited.author?.id;
+    if (authorId === client.user.id) return; // her own edits are none
+    const isOtherBot = edited.author?.bot;
+    if (isOtherBot && isLearnedGameChannel(edited.channel?.id)) return;
+    const mentionLookups = {
+      users: edited.mentions?.users,
+      roles: edited.mentions?.roles,
+      channels: edited.mentions?.channels,
+    };
+    const panelText = isOtherBot
+      ? [renderEmbeds(edited.embeds), renderButtons(edited.components)].filter(Boolean).join(" ")
+      : "";
+    const text = [
+      renderDiscordMentions(edited.content || "", mentionLookups),
+      panelText,
+      isOtherBot ? "" : renderMediaExtras(edited),
+    ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+    if (!text) return;
+    // Game panels churn silently; human edits carry the (edited) marker — the
+    // same way Discord shows it — so she can tease "saw you edit that, nya".
+    updateMessageContentByDiscordId(memoryDb, edited.id,
+      `${text.slice(0, 400)}${isOtherBot ? "" : " (edited)"}`);
+  } catch (error) {
+    console.warn("Edit tracking failed:", error.message);
+  }
+});
+
+// A message was deleted: never erase what she saw — mark it instead.
+client.on(Events.MessageDelete, (message) => {
+  try {
+    softDeleteMessageByDiscordId(memoryDb, message?.id);
+  } catch {
+    // Best-effort; a failed marker costs nothing.
+  }
+});
+
+client.on(Events.MessageDeleteBulk, (messages) => {
+  try {
+    for (const message of messages.values()) {
+      softDeleteMessageByDiscordId(memoryDb, message?.id);
+    }
+  } catch {
+    // Best-effort.
+  }
+});
+
+// Someone reacted to one of her messages: she notices. Reactions queue up for
+// a batched AI interpretation — what the emoji really meant here, how much
+// romance (if any) it carries, whether to mirror an emoji back. Analysis
+// disabled or unavailable: hearts fall back to the old flat rule.
+client.on(Events.MessageReactionAdd, async (reaction, user) => {
+  try {
+    if (!user || user.id === client.user.id) return;
+    const message = reaction?.message;
+    const channelId = message?.channelId;
+    if (!channelId || !sentMessageMetaById.has(message.id)) return;
+    const emoji = reaction.emoji?.name || "";
+    if (!emoji) return;
+    const record = recordReaction(channelId, { emoji, userName: displayNameFor(user.id) });
+    if (!record) return;
+    if (!config.analysisEnabled) {
+      if (HEART_REACT_RE.test(emoji)) updateRomance(user.id, { weight: 0.4, signal: `react:${emoji}` });
+      return;
+    }
+    queueReactionForAnalysis(channelId, {
+      messageId: message.id,
+      emoji,
+      userId: user.id,
+      userName: record.userName,
+      recordRef: record,
+    });
+  } catch (error) {
+    console.warn("Reaction tracking failed:", error.message);
+  }
+});
+
+// --- AI game spectating -------------------------------------------------------
+// In game channels she used to be completely silent. Now, when a game bot
+// posts a panel with a win/loss-worthy signal, she occasionally (cooldown +
+// chance + judgment) sends ONE spectator comment — teasing an all-in,
+// celebrating a jackpot. The same judgment call can learn the command word
+// that triggered the panel, so the game-command filter grows without code
+// changes (the "whl" lesson, automated).
+const GAME_PANEL_SIGNAL_RE = /\b(?:won|lost|win|winner|jackpot|congrat\w*|bankrupt|broke|bust|payout|multiplier|streak|all\s?in|profit)\b/i;
+const gameWatchLastAtByChannel = new Map();
+
+function maybeWatchGamePanel(message, panelText) {
+  try {
+    if (!panelText) return;
+    if (message.channel?.isDMBased?.()) return;
+    const signalText = `${message.content || ""} ${panelText}`.replace(/\s+/g, " ").trim();
+    if (!GAME_PANEL_SIGNAL_RE.test(signalText)) return;
+    const channelId = message.channel.id;
+    const last = gameWatchLastAtByChannel.get(channelId) || 0;
+    if (Date.now() - last < config.gameWatchCooldownMs) return;
+    if (Math.random() >= config.gameWatchChance) return;
+    // Claim the slot before the call, so a failed judgment doesn't re-roll instantly.
+    gameWatchLastAtByChannel.set(channelId, Date.now());
+    jobs.backgroundQueue.add(async () => {
+      // The last HUMAN line before this panel — the candidate trigger command.
+      const triggerRow = memoryDb.prepare(
+        "SELECT content FROM messages WHERE channel_id = ? AND is_bot = 0 ORDER BY id DESC LIMIT 1",
+      ).get(channelId);
+      const verdict = await analyst.judgeGameMoment({
+        channelLabel: message.channel.name || "game-channel",
+        gameBotName: message.author.displayName || message.author.username,
+        lines: recentChannelLines(channelId, 8),
+        triggerCandidate: triggerRow ? String(triggerRow.content).slice(0, 24) : "",
+      });
+      if (!verdict) return;
+      if (verdict.learnedCommand && !learnedGameCommands.has(verdict.learnedCommand)) {
+        learnedGameCommands.add(verdict.learnedCommand);
+        memoryDb.prepare("INSERT OR IGNORE INTO learned_commands(command, learned_at) VALUES (?, ?)")
+          .run(verdict.learnedCommand, Date.now());
+        console.log(`Judgment layer: learned new game command "${verdict.learnedCommand}"`);
+      }
+      if (!verdict.speak || !verdict.line) return;
+      const channel = message.channel;
+      await deliverReply({ channel, react: async () => {} }, verdict.line, {
+        lastSpokeAtRef,
+        spontaneous: true,
+        onSent: (sent) => trackSentMessage(sent, verdict.line),
+      });
+      rememberBotMessage(channel.id, verdict.line);
+      rememberOwnMessage({ channel, guild: channel.guild }, verdict.line);
+    }).catch((error) => console.warn("Game spectating failed:", error.message));
+  } catch (error) {
+    console.warn("Game watch trigger failed:", error.message);
+  }
+}
+
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) {
     botActivityByChannel.set(message.channel.id, (botActivityByChannel.get(message.channel.id) || 0) + 1);
-    // Log other bots' messages (truncated, never in learned game channels) so
-    // she knows who TEST./OwO/Karuta are when someone asks "who is dis?".
-    // No embeddings: game-bot spam would burn CPU for zero recall value.
-    if (!isLearnedGameChannel(message.channel.id) && message.content) {
-      logMessage(memoryDb, {
-        channelId: message.channel.id,
-        authorId: message.author.id,
-        authorName: message.author.displayName || message.author.username,
-        username: message.author.username,
-        content: message.content.replace(/\s+/g, " ").trim().slice(0, 200),
-        createdAt: message.createdTimestamp,
-        guildId: message.guild?.id || "",
-        isBot: true,
-      });
+    // Her own messages are logged at delivery time (rememberOwnMessage, with
+    // the full reply text) — the gateway echo must not double-log them.
+    if (message.author.id !== client.user.id) {
+      // Log other bots' messages (truncated, never in learned game channels) so
+      // she knows who TEST./OwO/Karuta are when someone asks "who is dis?".
+      // Game panels live in embeds and buttons, not content — render them so she
+      // can see the HighLow card the user wants help deciding on. Bot attachments
+      // (Karuta's card drops) are noted as metadata.
+      // No embeddings: game-bot spam would burn CPU for zero recall value.
+      const panelText = [
+        renderEmbeds(message.embeds),
+        renderButtons(message.components),
+        renderMediaExtras(message),
+      ].filter(Boolean).join(" ");
+      const logText = `${message.content || ""}${panelText ? ` ${panelText}` : ""}`.replace(/\s+/g, " ").trim();
+      if (logText && !isLearnedGameChannel(message.channel.id)) {
+        logMessage(memoryDb, {
+          channelId: message.channel.id,
+          authorId: message.author.id,
+          authorName: message.author.displayName || message.author.username,
+          username: message.author.username,
+          content: logText.slice(0, 400),
+          createdAt: message.createdTimestamp,
+          guildId: message.guild?.id || "",
+          isBot: true,
+          discordId: message.id,
+        });
+      }
+      // AI spectating: one judgment call when a game panel shows a
+      // win/loss-worthy moment — she may tease, and she may learn a new
+      // game command from what triggered it.
+      if (config.analysisEnabled) maybeWatchGamePanel(message, panelText);
     }
     return;
   }
@@ -653,17 +1083,23 @@ client.on(Events.MessageCreate, async (message) => {
     channels: message.mentions.channels,
   };
   const renderedContent = renderDiscordMentions(message.content, mentionLookups);
+  // Media awareness: attachments, stickers and polls become readable notes, so
+  // "look at this [attached: meme.png (image, 512 KB, 800×600)]" is a real
+  // conversation even when she cannot watch a video or listen to a voice clip.
+  const mediaExtras = renderMediaExtras(message);
+  const loggedContent = `${renderedContent}${mediaExtras ? ` ${mediaExtras}` : ""}`.trim();
 
   const loggedId = logMessage(memoryDb, {
     channelId: message.channel.id,
     authorId: message.author.id,
     authorName: message.member?.displayName || message.author.username,
     username: message.author.username,
-    content: renderedContent,
+    content: loggedContent,
     createdAt: message.createdTimestamp,
     guildId: message.guild?.id || "",
+    discordId: message.id,
   });
-  jobs.enqueueEmbedding(loggedId, renderedContent);
+  jobs.enqueueEmbedding(loggedId, loggedContent);
   const pending = (pendingByChannel.get(message.channel.id) || 0) + 1;
   pendingByChannel.set(message.channel.id, pending);
   if (pending >= 100) {
@@ -672,7 +1108,7 @@ client.on(Events.MessageCreate, async (message) => {
   }
 
   const displayName = message.member?.displayName || message.author.username;
-  rememberUserMessage(message.channel.id, displayName, renderedContent);
+  rememberUserMessage(message.channel.id, displayName, loggedContent);
 
   // Decide what this message is BEFORE any async work, so stray replies in
   // game channels never trigger Discord API calls just to resolve targets.
@@ -728,7 +1164,7 @@ client.on(Events.MessageCreate, async (message) => {
       const replyNote = noteTarget
         ? ` They sent it as a Discord reply to ${noteTarget.isSelf ? "your earlier message" : `${noteTarget.authorName}'s message${noteTarget.content ? ` ("${noteTarget.content}")` : ""}`}.`
         : "";
-      const chimePrompt = `Someone in Discord said: "${renderedContent}".${replyNote} React naturally, only if there is a reason to join in. If you would add nothing useful, answer exactly: NO_REPLY.`;
+      const chimePrompt = `Someone in Discord said: "${loggedContent}".${replyNote} React naturally, only if there is a reason to join in. If you would add nothing useful, answer exactly: NO_REPLY.`;
       let answer = await askAI({
         prompt: chimePrompt,
         personality: config.personality,
@@ -741,7 +1177,7 @@ client.on(Events.MessageCreate, async (message) => {
           systemContext: renderAliveness(new Date(), lastSpokeAtRef.value),
         }));
       if (!/^no[_\s-]?reply$/i.test(answer.trim())) {
-        await deliverReply(message, answer, { lastSpokeAtRef });
+        await deliverReply(message, answer, { lastSpokeAtRef, onSent: (sent) => trackSentMessage(sent, answer) });
         updateAffinity(message.author.id);
         markEngaged(message.channel.id, message.author.id);
         spontaneousReplies.set(message.channel.id, Date.now());
@@ -773,7 +1209,7 @@ client.on(Events.MessageCreate, async (message) => {
       // never name the wrong bot. Never hardcode her own name — use the
       // live username so renaming the bot cannot make her lie.
       answer = pickIdentityAnswer(replyTarget, client.user.username);
-      await deliverReply(message, answer, { lastSpokeAtRef });
+      await deliverReply(message, answer, { lastSpokeAtRef, onSent: (sent) => trackSentMessage(sent, answer) });
       updateAffinity(message.author.id);
       markEngaged(message.channel.id, message.author.id);
       rememberBotMessage(message.channel.id, answer);
@@ -808,20 +1244,43 @@ client.on(Events.MessageCreate, async (message) => {
       // Memory-rich chat reply: hybrid retrieval + streamed delivery.
       const factsContextText = factsContext(message.channel.id);
       const deepRecall = /\b(remember|that time|back when|used to|last week|yesterday|earlier)\b/i.test(prompt);
+      // Vision: if they attached image(s) to a message meant for her, actually
+      // look at them — the images ride along in the same request, so the reply
+      // costs no extra API call.
+      let visionImages = [];
+      if (message.attachments?.size) {
+        try {
+          visionImages = await collectVisionImages(message);
+        } catch {
+          // A failed download must never block the text reply.
+        }
+      }
+      const promptWithMedia = `${prompt}${mediaExtras ? ` ${mediaExtras}` : ""}`.trim();
       let embedVector = null;
       try {
-        embedVector = await embedText(prompt);
+        embedVector = await embedText(promptWithMedia);
       } catch {
         // FTS-only retrieval still works if the local embedder fails.
       }
+      // "here @OwO" / "this" aimed at another bot is a pointer, not a command:
+      // they are holding up that bot's message for her to look at.
+      const mentionedOtherBot = mentioned
+        ? null
+        : [...message.mentions.users.values()].find((user) => user.bot && user.id !== client.user.id) || null;
+      const pointingAtBot = mentionedOtherBot && isPointingAtBot(prompt)
+        ? (mentionedOtherBot.displayName || mentionedOtherBot.globalName || mentionedOtherBot.username)
+        : null;
+      const reactionsSeen = recentReactionSummary(message.channel.id);
       const persistentContext = buildContext(memoryDb, {
         message: {
           channelId: message.channel.id,
           authorId: message.author.id,
           authorName: displayName,
-          content: prompt,
+          content: promptWithMedia,
           guildId: message.guild?.id || "",
           activeConvo: engaged || replyingToMe,
+          pointingAtBot,
+          reactionsSeen,
         },
         embedVector,
         deepRecall,
@@ -840,13 +1299,24 @@ client.on(Events.MessageCreate, async (message) => {
             renderAliveness(new Date(), lastSpokeAtRef.value),
             factsContextText,
             persistentContext.memoryBlock,
+            ...(visionImages.length
+              ? ["This message includes attached image(s) and you can actually see them. Look at them properly: mention what you concretely notice — people, animals, text, places, the vibe — like a friend who actually opened the photo, not someone guessing from the filename. Describe what stands out; that description is how you'll remember the image later."]
+              : []),
           ].filter(Boolean).join("\n"),
         },
-        { role: "user", content: prompt },
+        { role: "user", content: visionUserContent(promptWithMedia, visionImages) },
       ];
       const lastOwnReply = lastAssistantReply(message.channel.id);
+      let streamedSentId = null;
       answer = await deliverStreamedReply(message, (onDelta) => streamReply({ messages, onDelta }), {
         lastSpokeAtRef,
+        // Tracked from the first moment the message exists (reactions during
+        // streaming count); the real text is filled in below once the stream
+        // finishes — that text is what reaction interpretation reads later.
+        onSent: (sent) => {
+          streamedSentId = sent?.id;
+          trackSentMessage(sent, "");
+        },
         // If the stream produced a verbatim repeat of what she just said in
         // this channel, regenerate once and swap it in before anyone reads it.
         dupCheck: lastOwnReply ? async (streamedText) => {
@@ -860,9 +1330,10 @@ client.on(Events.MessageCreate, async (message) => {
         } : undefined,
       });
       delivered = true;
+      if (streamedSentId && answer) noteSentMessageContent(streamedSentId, answer);
     }
     if (!answer) return;
-    if (!delivered) await deliverReply(message, answer, { lastSpokeAtRef });
+    if (!delivered) await deliverReply(message, answer, { lastSpokeAtRef, onSent: (sent) => trackSentMessage(sent, answer) });
     updateAffinity(message.author.id);
     markEngaged(message.channel.id, message.author.id);
     rememberBotMessage(message.channel.id, answer);

@@ -36,6 +36,17 @@ export const config = {
   // Optional timezone label shown with the clock (e.g. "PHT" for Asia/Manila).
   timezoneLabel: process.env.TIMEZONE_LABEL || "PHT",
   memoryContextTokens: Math.max(4000, Number(process.env.MEMORY_CONTEXT_TOKENS || 32000)),
+  // AI judgment layer: small analysis calls (reaction meanings, game-channel
+  // spectating, command learning) share the same key pool but with their own
+  // tight budget so live replies always keep priority. All optional.
+  analysisEnabled: process.env.ANALYSIS_ENABLED !== "false",
+  analysisMaxPerMinute: Math.max(1, Number(process.env.ANALYSIS_MAX_PER_MIN || 10)),
+  // Reactions accumulate this long before ONE batched judgment call.
+  reactionFlushMs: Math.max(30, Number(process.env.REACTION_FLUSH_MINUTES || 2.5)) * 60_000,
+  // Spectator comments in game channels: how often a juicy panel is even
+  // considered, and the per-channel quiet period after she comments.
+  gameWatchChance: Number(process.env.GAME_WATCH_CHANCE || 0.2),
+  gameWatchCooldownMs: Math.max(5, Number(process.env.GAME_WATCH_COOLDOWN_MINUTES || 45)) * 60_000,
 };
 
 export function validateConfig() {

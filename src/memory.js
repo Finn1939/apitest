@@ -142,8 +142,8 @@ export function truncateTokens(text, maxTokens) {
 
 export function logMessage(db, message) {
   return db.prepare(`
-    INSERT INTO messages(channel_id, author_id, author_name, username, content, created_at, guild_id, is_bot)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO messages(channel_id, author_id, author_name, username, content, created_at, guild_id, is_bot, discord_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     message.channelId,
     message.authorId,
@@ -153,7 +153,29 @@ export function logMessage(db, message) {
     message.createdAt || Date.now(),
     message.guildId || "",
     message.isBot ? 1 : 0,
+    message.discordId || "",
   ).lastInsertRowid;
+}
+
+// Edits: she should see the CURRENT text of a message, so update the stored
+// row in place (FTS stays in sync through the update trigger). Returns whether
+// a row actually changed — unknown/legacy ids are silently ignored.
+export function updateMessageContentByDiscordId(db, discordId, content) {
+  if (!discordId) return false;
+  const info = db.prepare("UPDATE messages SET content = ? WHERE discord_id = ?")
+    .run(String(content || "").slice(0, 2000), discordId);
+  return info.changes > 0;
+}
+
+// Deletes: never erase what she saw — keep the text and mark it, so "I saw
+// you delete that" is a memory, not a hole. Idempotent.
+export function softDeleteMessageByDiscordId(db, discordId) {
+  if (!discordId) return false;
+  const row = db.prepare("SELECT content FROM messages WHERE discord_id = ?").get(discordId);
+  if (!row || !row.content || /\(deleted\)\s*$/.test(row.content)) return false;
+  db.prepare("UPDATE messages SET content = ? WHERE discord_id = ?")
+    .run(`${row.content} (deleted)`, discordId);
+  return true;
 }
 
 export function buildContext(db, { message, embedVector, personalityPath = "personality.txt", deepRecall = false, botId = "", replyTo = null, memoryContextTokens = 32000 }) {
@@ -210,6 +232,21 @@ export function buildContext(db, { message, embedVector, personalityPath = "pers
       // her replies ("not sure who you're replying to" in a game channel).
       speakerLines.push(`Only if they directly ask who they are replying to: the answer is ${replyTo.authorName} — never guess a different bot or person. Otherwise this is just background for pronouns; do not bring it up.`);
     }
+  }
+  // "here @OwO": a short deictic message that mentions another bot is pointing
+  // at that bot's output above — usually holding up a game panel they want her
+  // to help with. Without this, she answered "tell me first" even though the
+  // panel was sitting right there in the recent conversation.
+  if (message.pointingAtBot) {
+    speakerLines.push(
+      `Their message is pointing at ${message.pointingAtBot}'s message above — read that message in the recent conversation to see what they mean. They are talking to you about it, not commanding ${message.pointingAtBot}.`,
+    );
+  }
+  // Emoji reactions people left on her recent messages — social signals she
+  // would naturally notice (what landed, what they loved). Ephemeral, passed
+  // in from the live handler; not stored in the database.
+  if (message.reactionsSeen) {
+    speakerLines.push(`Reactions people recently left on your messages: ${message.reactionsSeen}. You notice these — what got hearts felt good.`);
   }
   const speakerText = speakerLines.join(" ");
 

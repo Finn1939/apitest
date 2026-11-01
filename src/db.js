@@ -156,5 +156,24 @@ export function createMemoryDb(filePath) {
     }
     db.pragma("user_version = 6");
   }
+  // v7: store the Discord message id so edits and deletes can be tracked back
+  // to the logged row — she sees the current text and remembers what was
+  // removed. Legacy rows keep '' and simply can't be updated.
+  if (db.pragma("user_version", { simple: true }) < 7) {
+    const msgColumns = db.prepare("PRAGMA table_info(messages)").all();
+    if (!msgColumns.some((column) => column.name === "discord_id")) {
+      db.exec("ALTER TABLE messages ADD COLUMN discord_id TEXT NOT NULL DEFAULT ''");
+    }
+    db.exec("CREATE INDEX IF NOT EXISTS idx_messages_discord_id ON messages(discord_id)");
+    db.pragma("user_version = 7");
+  }
+  // v8: game-command vocabulary learned by the AI judgment layer. When she
+  // recognizes a new game bot's trigger word (the way "whl" once had to be
+  // hand-added), it persists here and reloads at boot — the filter grows
+  // without code changes.
+  if (db.pragma("user_version", { simple: true }) < 8) {
+    db.exec("CREATE TABLE IF NOT EXISTS learned_commands(command TEXT PRIMARY KEY, learned_at INTEGER NOT NULL)");
+    db.pragma("user_version = 8");
+  }
   return db;
 }
