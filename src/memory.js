@@ -86,11 +86,8 @@ export function logMessage(db, message) {
 }
 
 export function buildContext(db, { message, embedVector, personalityPath = "personality.txt", deepRecall = false, botId = "", replyTo = null }) {
-  const personality = truncateTokens(readFileSync(personalityPath, "utf8").trim(), 500);
-  const selfModel = truncateTokens(
-    db.prepare("SELECT persona FROM self_model WHERE id = 1").get()?.persona || "",
-    200,
-  );
+  const personality = readFileSync(personalityPath, "utf8").trim();
+  const selfModel = db.prepare("SELECT persona FROM self_model WHERE id = 1").get()?.persona || "";
 
   // Who is speaking, how the bot feels about them, and when they last really talked.
   const speakerName = message.authorName || "Someone";
@@ -152,18 +149,18 @@ export function buildContext(db, { message, embedVector, personalityPath = "pers
     SELECT fact, confidence FROM facts
     WHERE subject = ?
     ORDER BY hits DESC, last_seen DESC
-  `).all(`user:${message.authorId}`).slice(0, 12);
-  const factsText = truncateTokens(speakerFacts.length
+  `).all(`user:${message.authorId}`);
+  const factsText = speakerFacts.length
     ? `What you know about ${speakerName} (the speaker):\n${speakerFacts.map(({ fact, confidence }) =>
       `- [${confidence.toFixed(2)}] ${fact}`).join("\n")}`
-    : "", 600);
+    : "";
 
   const recent = db.prepare(`
     SELECT author_name, content FROM messages
     WHERE channel_id = ?
-    ORDER BY id DESC LIMIT 20
+    ORDER BY id DESC
   `).all(message.channelId).reverse();
-  const recentText = truncateTokens(recent.map((entry) => `${entry.author_name}: ${entry.content}`).join("\n"), 1000);
+  const recentText = recent.map((entry) => `${entry.author_name}: ${entry.content}`).join("\n");
   const summaries = db.prepare(`
     SELECT summary FROM summaries WHERE channel_id = ? ORDER BY created_at DESC LIMIT 2
   `).all(message.channelId).map(({ summary }) => summary).join("\n");
@@ -223,12 +220,9 @@ export function buildContext(db, { message, embedVector, personalityPath = "pers
         + 0.1 * (row.importance ?? 0.5),
     }))
     .sort((a, b) => b.score - a.score)
-    .slice(0, deepRecall ? 16 : 8)
     .map(({ row }) => row);
-  const relevantText = truncateTokens(
-    [summaries, ...uniqueRelevant.map((row) => `${row.author_name}: ${row.content}`)].filter(Boolean).join("\n"),
-    1200,
-  );
+  const relevantText =
+    [summaries, ...uniqueRelevant.map((row) => `${row.author_name}: ${row.content}`)].filter(Boolean).join("\n");
   const memoryBlock = PROMPT_A
     .replace("{{SELF_MODEL}}", selfModel)
     .replace("{{SPEAKER}}", speakerText)
