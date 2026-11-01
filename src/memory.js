@@ -124,6 +124,7 @@ export function buildContext(db, { message, embedVector, personalityPath = "pers
       speakerLines.push("The user is replying to you, the bot. Pronouns such as \"you\" and \"your\" refer to you; pronouns such as \"I\" and \"me\" refer to the replying user.");
     } else {
       speakerLines.push(`When they say "he", "him" or "his", they most likely mean ${replyTo.authorName}.`);
+      speakerLines.push(`If the user asks who they are replying to, name the author exactly as ${replyTo.authorName}. Do not guess another bot or person from surrounding messages.`);
     }
   }
   const speakerText = speakerLines.join(" ");

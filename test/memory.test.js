@@ -189,3 +189,27 @@ test("buildContext identifies replies to the bot as self-replies", () => {
   assert.match(context.memoryBlock, /user is replying to you, the bot/);
   rmSync(directory, { recursive: true, force: true });
 });
+
+test("buildContext names the exact author for a bot reply identity question", () => {
+  const directory = mkdtempSync(join(tmpdir(), "apitest-other-bot-reply-"));
+  const db = createMemoryDb(join(directory, "memory.db"));
+  writeFileSync(join(directory, "personality.txt"), "You are a playful Discord companion.");
+
+  const context = buildContext(db, {
+    message: {
+      channelId: "channel-1",
+      authorId: "user-sprite",
+      authorName: "sprite vodka",
+      content: "who's this",
+      guildId: "guild-1",
+    },
+    personalityPath: join(directory, "personality.txt"),
+    botId: "bot-1",
+    replyTo: { authorName: "CardCompanion", isSelf: false, content: "Tap to see message", ageMs: 1_000 },
+  });
+
+  assert.match(context.memoryBlock, /CardCompanion's message/);
+  assert.match(context.memoryBlock, /name the author exactly as CardCompanion/);
+  assert.match(context.memoryBlock, /Do not guess another bot or person/);
+  rmSync(directory, { recursive: true, force: true });
+});
