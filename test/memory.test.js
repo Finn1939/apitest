@@ -104,6 +104,39 @@ test("buildContext without a reply stays silent about replies", () => {
   rmSync(directory, { recursive: true, force: true });
 });
 
+test("buildContext caps large recent and relevant memory within a configured budget", () => {
+  const directory = mkdtempSync(join(tmpdir(), "apitest-large-context-"));
+  const db = createMemoryDb(join(directory, "memory.db"));
+  writeFileSync(join(directory, "personality.txt"), "You are a concise Discord companion.");
+  for (let index = 0; index < 500; index += 1) {
+    logMessage(db, {
+      channelId: "channel-large",
+      authorId: "user-speaker",
+      authorName: "Speaker",
+      username: "speaker",
+      content: `message ${index}: ${"long memory detail ".repeat(30)}`,
+      createdAt: Date.now() - (500 - index) * 60_000,
+      guildId: "guild-1",
+    });
+  }
+
+  const context = buildContext(db, {
+    message: {
+      channelId: "channel-large",
+      authorId: "user-speaker",
+      authorName: "Speaker",
+      content: "what do you remember?",
+      guildId: "guild-1",
+    },
+    personalityPath: join(directory, "personality.txt"),
+    botId: "bot-1",
+    memoryContextTokens: 6000,
+  });
+
+  assert.ok(context.estimatedTokens < 6000);
+  rmSync(directory, { recursive: true, force: true });
+});
+
 test("buildContext identifies replies to the bot as self-replies", () => {
   const directory = mkdtempSync(join(tmpdir(), "apitest-self-reply-"));
   const db = createMemoryDb(join(directory, "memory.db"));

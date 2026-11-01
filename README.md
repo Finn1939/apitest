@@ -54,6 +54,13 @@ When someone asks about the past ("remember", "back when", ...), retrieval
 digs deeper automatically. Summaries and facts are consolidated in the
 background, and a nightly journal entry feeds the weekly self-reflection.
 
+Prompt context is bounded to a configurable model budget so large channels
+remain safe. `MEMORY_CONTEXT_TOKENS` defaults to 32000 and allocates space
+between recent messages, relevant retrieved memories, facts, personality, and
+reply context. The database can retain far more history than the prompt budget;
+older history is prioritized through summaries, facts, and relevance-ranked
+retrieval rather than loading every raw message.
+
 Keep these files outside deployment archive replacement:
 
 - `memory.db` - persistent SQLite messages, facts, summaries, relationships, and self-model

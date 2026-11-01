@@ -31,6 +31,7 @@ export const config = {
   spontaneousCooldownMs: Number(process.env.SPONTANEOUS_COOLDOWN_MINUTES || 15) * 60_000,
   // Optional timezone label shown with the clock (e.g. "PHT" for Asia/Manila).
   timezoneLabel: process.env.TIMEZONE_LABEL || "PHT",
+  memoryContextTokens: Math.max(4000, Number(process.env.MEMORY_CONTEXT_TOKENS || 32000)),
 };
 
 export function validateConfig() {

@@ -412,6 +412,7 @@ client.on(Events.MessageCreate, async (message) => {
         personalityPath: config.personalityPath,
         botId: client.user.id,
         replyTo: replyTarget,
+        memoryContextTokens: config.memoryContextTokens,
       });
       const messages = [
         {

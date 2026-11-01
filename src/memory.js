@@ -85,9 +85,12 @@ export function logMessage(db, message) {
   ).lastInsertRowid;
 }
 
-export function buildContext(db, { message, embedVector, personalityPath = "personality.txt", deepRecall = false, botId = "", replyTo = null }) {
-  const personality = readFileSync(personalityPath, "utf8").trim();
-  const selfModel = db.prepare("SELECT persona FROM self_model WHERE id = 1").get()?.persona || "";
+export function buildContext(db, { message, embedVector, personalityPath = "personality.txt", deepRecall = false, botId = "", replyTo = null, memoryContextTokens = 32000 }) {
+  const personality = truncateTokens(readFileSync(personalityPath, "utf8").trim(), 2000);
+  const selfModel = truncateTokens(
+    db.prepare("SELECT persona FROM self_model WHERE id = 1").get()?.persona || "",
+    1200,
+  );
 
   // Who is speaking, how the bot feels about them, and when they last really talked.
   const speakerName = message.authorName || "Someone";
@@ -158,7 +161,7 @@ export function buildContext(db, { message, embedVector, personalityPath = "pers
   const recent = db.prepare(`
     SELECT author_name, content FROM messages
     WHERE channel_id = ?
-    ORDER BY id DESC
+    ORDER BY id DESC LIMIT 500
   `).all(message.channelId).reverse();
   const recentText = recent.map((entry) => `${entry.author_name}: ${entry.content}`).join("\n");
   const summaries = db.prepare(`
@@ -220,6 +223,7 @@ export function buildContext(db, { message, embedVector, personalityPath = "pers
         + 0.1 * (row.importance ?? 0.5),
     }))
     .sort((a, b) => b.score - a.score)
+    .slice(0, deepRecall ? 32 : 24)
     .map(({ row }) => row);
   const relevantText =
     [summaries, ...uniqueRelevant.map((row) => `${row.author_name}: ${row.content}`)].filter(Boolean).join("\n");
@@ -231,5 +235,22 @@ export function buildContext(db, { message, embedVector, personalityPath = "pers
     .replace("{{RELEVANT_MEMORIES}}", relevantText || "No relevant memories.")
     .replace("{{RECENT_MESSAGES}}", recentText || "No recent messages.");
 
-  return { personality, memoryBlock, estimatedTokens: estimatedTokens(`${personality}\n${memoryBlock}`) };
+  const fixedTokens = estimatedTokens(`${personality}\n${speakerText}\n${rosterText}`);
+  const memoryBudget = Math.max(4000, memoryContextTokens - fixedTokens - 4000);
+  const factsBudget = Math.min(4000, Math.floor(memoryBudget * 0.14));
+  const recentBudget = Math.min(12000, Math.floor(memoryBudget * 0.43));
+  const relevantBudget = Math.min(8000, memoryBudget - factsBudget - recentBudget);
+  const boundedFacts = truncateTokens(factsText, factsBudget);
+  const boundedRecent = truncateTokens(recentText, recentBudget);
+  const boundedRelevant = truncateTokens(relevantText, relevantBudget);
+  const boundedMemoryBlock = memoryBlock
+    .replace(factsText || "", boundedFacts)
+    .replace(recentText || "", boundedRecent)
+    .replace(relevantText || "", boundedRelevant);
+
+  return {
+    personality,
+    memoryBlock: boundedMemoryBlock,
+    estimatedTokens: estimatedTokens(`${personality}\n${boundedMemoryBlock}`),
+  };
 }
