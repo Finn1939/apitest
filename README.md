@@ -31,6 +31,13 @@ generated locally by `@huggingface/transformers` and searched alongside FTS5
 text matches. Summaries and facts are consolidated in the background, while
 live replies are left unaffected by memory jobs.
 
+Keep these files outside deployment archive replacement:
+
+- `memory.db` - persistent SQLite messages, facts, summaries, relationships, and self-model
+- `data/channel-memory.json` - recent channel history and channel facts
+
+Do not delete or extract over either of these directories during bot updates.
+
 Configured environment variables include:
 
 - `DB_PATH`

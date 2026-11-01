@@ -4,3 +4,6 @@ node_modules/
 npm-debug.log*
 data/channel-memory.json
 data/channel-memory.json.tmp
+memory.db
+memory.db-shm
+memory.db-wal
