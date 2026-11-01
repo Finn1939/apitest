@@ -366,10 +366,12 @@ client.on(Events.MessageCreate, async (message) => {
   await message.channel.sendTyping();
   try {
     let answer;
-    if (replyTarget && isReplyIdentityQuestion(prompt)) {
-      answer = replyTarget.isSelf
-        ? "You're replying to me, Teacher-san."
-        : `You're replying to ${replyTarget.authorName}.`;
+    if (isReplyIdentityQuestion(prompt)) {
+      answer = replyTarget
+        ? replyTarget.isSelf
+          ? "You're replying to me, Teacher-san."
+          : `You're replying to ${replyTarget.authorName}.`
+        : "I can't verify the referenced message, nya.";
       await deliverReply(message, answer, { lastSpokeAtRef });
       updateAffinity(message.author.id);
       rememberBotMessage(message.channel.id, answer);
