@@ -228,7 +228,7 @@ client.once(Events.ClientReady, (readyClient) => {
     { name: "forget_all", description: "Forget a user's facts", options: [{ name: "user", description: "Member to forget", type: 6, required: true }] },
     { name: "reflect_now", description: "Run a self-reflection immediately" },
   ]).catch((error) => console.error("Failed to register memory commands:", error));
-  scheduleSpontaneousMessages();
+  setTimeout(scheduleSpontaneousMessages, randomDelay(20, 50));
   // Warm the local embedding model so the first live reply is not slow.
   jobs.backgroundQueue.add(() => embedText("warmup")).catch(() => {});
   setInterval(() => jobs.backgroundQueue.add(() => jobs.reflect()), 7 * 24 * 60 * 60_000).unref();
