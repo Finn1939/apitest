@@ -42,6 +42,8 @@ const storedMemory = loadMemory();
 const conversations = storedMemory.conversations;
 const channelFacts = storedMemory.facts;
 const spontaneousReplies = new Map();
+const botActivityByChannel = new Map();
+const botCommandCountByChannel = new Map();
 const memoryDb = createMemoryDb(config.dbPath);
 const jobs = createJobs(memoryDb);
 let pendingByChannel = new Map();
@@ -161,6 +163,26 @@ client.on(Events.InteractionCreate, async (interaction) => {
 });
 
 client.on(Events.MessageCreate, async (message) => {
+  if (message.author.bot) {
+    botActivityByChannel.set(message.channel.id, (botActivityByChannel.get(message.channel.id) || 0) + 1);
+    return;
+  }
+
+  const humanCommand = message.content.trim().toLowerCase().replace(/[.!]+$/, "");
+  const karutaCommand = /^(?:k(?:d|l|g|c|u|i|q|t|v|w|m|a)?|dk|grab|drop|burn|daily|vote|inv(?:entory)?|collection|wishlist|worker|observe)$/.test(humanCommand);
+  if (karutaCommand) {
+    const count = (botCommandCountByChannel.get(message.channel.id) || 0) + 1;
+    botCommandCountByChannel.set(message.channel.id, count);
+    if (count >= 5 && (botActivityByChannel.get(message.channel.id) || 0) >= 5) {
+      const facts = channelFacts.get(message.channel.id) || [];
+      const fact = "This is a bot-game channel, probably Karuta: people repeatedly send short game commands and bots repeatedly reply with drops, cards, or command results.";
+      if (!facts.includes(fact)) {
+        channelFacts.set(message.channel.id, addFact(facts, fact));
+        persistMemory();
+      }
+    }
+  }
+
   const loggedId = logMessage(memoryDb, {
     channelId: message.channel.id,
     authorId: message.author.id,
@@ -175,7 +197,6 @@ client.on(Events.MessageCreate, async (message) => {
     pendingByChannel.set(message.channel.id, 0);
     jobs.backgroundQueue.add(() => jobs.consolidate(message.channel.id));
   }
-  if (message.author.bot) return;
 
   rememberUserMessage(message.channel.id, message.member?.displayName || message.author.username, message.content);
 
