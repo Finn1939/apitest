@@ -89,11 +89,20 @@ function isLearnedGameChannel(channelId) {
 async function resolveReplyTarget(message) {
   const referenceId = message.reference?.messageId;
   if (!referenceId) return null;
-  let ref = message.channel?.messages?.cache?.get(referenceId) || null;
+  let ref = message.referencedMessage
+    || message.channel?.messages?.cache?.get(referenceId)
+    || null;
   try {
     if (!ref) ref = await message.fetchReference();
   } catch {
     ref = null; // the referenced message may be deleted or too old to fetch
+  }
+  try {
+    if (!ref && message.channel?.messages?.fetch) {
+      ref = await message.channel.messages.fetch(referenceId);
+    }
+  } catch {
+    ref = null;
   }
   if (ref?.author) {
     return {
@@ -110,8 +119,9 @@ async function resolveReplyTarget(message) {
   // Even if the message is gone, the reply mention still says who it was.
   const user = message.mentions?.repliedUser;
   if (!user) return null;
+  const member = message.mentions?.members?.get(user.id);
   return {
-    authorName: user.globalName || user.username || "someone",
+    authorName: member?.displayName || user.globalName || user.displayName || user.username || "someone",
     isSelf: user.id === client.user.id,
     content: "",
     ageMs: 0,
