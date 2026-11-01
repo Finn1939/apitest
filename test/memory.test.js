@@ -104,6 +104,36 @@ test("buildContext without a reply stays silent about replies", () => {
   rmSync(directory, { recursive: true, force: true });
 });
 
+test("dollar signs in memories never corrupt the memory block", () => {
+  // String.replace interprets "$&", "$`", "$'" and "$$" in a replacement.
+  // Facts and recent messages are injected as replacements, so a memory like
+  // "sed 's/$&/x/'" used to silently mangle the whole block.
+  const directory = mkdtempSync(join(tmpdir(), "apitest-dollars-"));
+  const db = createMemoryDb(join(directory, "memory.db"));
+  writeFileSync(join(directory, "personality.txt"), "You are a playful Discord companion.");
+  const factText = "Alex pasted the command sed 's/$&/x/' and $$ prices";
+  db.prepare("INSERT INTO facts(subject, fact, confidence, first_seen, last_seen) VALUES (?, ?, ?, ?, ?)")
+    .run("user:u1", factText, 0.9, Date.now(), Date.now());
+  logMessage(db, {
+    channelId: "channel-1", authorId: "u1", authorName: "Alex", username: "alex",
+    content: "the $` backtick and $' quote broke it", createdAt: Date.now(), guildId: "guild-1",
+  });
+
+  const context = buildContext(db, {
+    message: { channelId: "channel-1", authorId: "u1", authorName: "Alex", content: "what did I paste", guildId: "guild-1" },
+    personalityPath: join(directory, "personality.txt"),
+    botId: "bot-1",
+  });
+
+  // The raw text must survive verbatim, exactly once — pattern expansion
+  // would duplicate or mangle it.
+  assert.equal(context.memoryBlock.split(factText).length - 1, 1, "fact text was corrupted or duplicated by replace() patterns");
+  assert.ok(context.memoryBlock.includes("$` backtick"), "recent message was corrupted by replace() patterns");
+  // ...and no template holes may appear.
+  assert.ok(!context.memoryBlock.includes("{{"), "template placeholder leaked into the block");
+  rmSync(directory, { recursive: true, force: true });
+});
+
 test("buildContext caps large recent and relevant memory within a configured budget", () => {
   const directory = mkdtempSync(join(tmpdir(), "apitest-large-context-"));
   const db = createMemoryDb(join(directory, "memory.db"));

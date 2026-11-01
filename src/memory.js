@@ -227,30 +227,31 @@ export function buildContext(db, { message, embedVector, personalityPath = "pers
     .map(({ row }) => row);
   const relevantText =
     [summaries, ...uniqueRelevant.map((row) => `${row.author_name}: ${row.content}`)].filter(Boolean).join("\n");
-  const memoryBlock = PROMPT_A
-    .replace("{{SELF_MODEL}}", selfModel)
-    .replace("{{SPEAKER}}", speakerText)
-    .replace("{{ROSTER}}", rosterText || "You have not met anyone here yet.")
-    .replace("{{USER_FACTS}}", factsText || `You know nothing about ${speakerName} yet.`)
-    .replace("{{RELEVANT_MEMORIES}}", relevantText || "No relevant memories.")
-    .replace("{{RECENT_MESSAGES}}", recentText || "No recent messages.");
 
+  // Budget the sections BEFORE they enter the template. All replacements use
+  // function form: String.replace interprets "$&", "$`", "$'" and "$$" in a
+  // string replacement, so memories containing dollar signs (code snippets,
+  // prices, shell commands) would silently corrupt the block.
   const fixedTokens = estimatedTokens(`${personality}\n${speakerText}\n${rosterText}`);
   const memoryBudget = Math.max(4000, memoryContextTokens - fixedTokens - 4000);
   const factsBudget = Math.min(4000, Math.floor(memoryBudget * 0.14));
   const recentBudget = Math.min(12000, Math.floor(memoryBudget * 0.43));
-  const relevantBudget = Math.min(8000, memoryBudget - factsBudget - recentBudget);
+  const relevantBudget = Math.max(0, Math.min(8000, memoryBudget - factsBudget - recentBudget));
   const boundedFacts = truncateTokens(factsText, factsBudget);
   const boundedRecent = truncateTokens(recentText, recentBudget);
   const boundedRelevant = truncateTokens(relevantText, relevantBudget);
-  const boundedMemoryBlock = memoryBlock
-    .replace(factsText || "", boundedFacts)
-    .replace(recentText || "", boundedRecent)
-    .replace(relevantText || "", boundedRelevant);
+
+  const memoryBlock = PROMPT_A
+    .replace("{{SELF_MODEL}}", () => selfModel)
+    .replace("{{SPEAKER}}", () => speakerText)
+    .replace("{{ROSTER}}", () => rosterText || "You have not met anyone here yet.")
+    .replace("{{USER_FACTS}}", () => boundedFacts || `You know nothing about ${speakerName} yet.`)
+    .replace("{{RELEVANT_MEMORIES}}", () => boundedRelevant || "No relevant memories.")
+    .replace("{{RECENT_MESSAGES}}", () => boundedRecent || "No recent messages.");
 
   return {
     personality,
-    memoryBlock: boundedMemoryBlock,
-    estimatedTokens: estimatedTokens(`${personality}\n${boundedMemoryBlock}`),
+    memoryBlock,
+    estimatedTokens: estimatedTokens(`${personality}\n${memoryBlock}`),
   };
 }

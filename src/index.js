@@ -89,9 +89,9 @@ function isLearnedGameChannel(channelId) {
 async function resolveReplyTarget(message) {
   const referenceId = message.reference?.messageId;
   if (!referenceId) return null;
-  let ref = message.referencedMessage
-    || message.channel?.messages?.cache?.get(referenceId)
-    || null;
+  // No referencedMessage property exists in discord.js 14: resolve via cache,
+  // fetchReference(), or a direct channel fetch, in that order.
+  let ref = message.channel?.messages?.cache?.get(referenceId) || null;
   try {
     if (!ref) ref = await message.fetchReference();
   } catch {

@@ -92,13 +92,15 @@ export function createJobs(db) {
     const summaries = db.prepare("SELECT summary FROM summaries ORDER BY created_at DESC LIMIT 20").all();
     const facts = db.prepare("SELECT subject, fact FROM facts ORDER BY hits DESC LIMIT 50").all();
     const journal = db.prepare("SELECT entry FROM journal ORDER BY created_at DESC LIMIT 5").all();
+    // Function-form replacements: "$&"/"$`"/"$'"/"$$" in facts, summaries
+    // or journal entries must never be treated as replace() patterns.
     return completeAI({
       messages: [{
         role: "system",
-        content: PROMPT_C.replace("{{SELF_MODEL}}", model)
-          .replace("{{SUMMARIES}}", summaries.map((row) => row.summary).join("\n"))
-          .replace("{{FACTS}}", facts.map((row) => `${row.subject}: ${row.fact}`).join("\n"))
-          .replace("{{JOURNAL}}", journal.map((row) => row.entry).join("\n")),
+        content: PROMPT_C.replace("{{SELF_MODEL}}", () => model)
+          .replace("{{SUMMARIES}}", () => summaries.map((row) => row.summary).join("\n"))
+          .replace("{{FACTS}}", () => facts.map((row) => `${row.subject}: ${row.fact}`).join("\n"))
+          .replace("{{JOURNAL}}", () => journal.map((row) => row.entry).join("\n")),
       }],
       thinking: true,
       maxTokens: 300,
@@ -123,8 +125,8 @@ export function createJobs(db) {
     return completeAI({
       messages: [{
         role: "system",
-        content: PROMPT_D.replace("{{SUMMARIES}}", summaries.map((row) => row.summary).join("\n"))
-          .replace("{{FACTS}}", facts.map((row) => `${row.subject}: ${row.fact}`).join("\n")),
+        content: PROMPT_D.replace("{{SUMMARIES}}", () => summaries.map((row) => row.summary).join("\n"))
+          .replace("{{FACTS}}", () => facts.map((row) => `${row.subject}: ${row.fact}`).join("\n")),
       }],
       thinking: true,
       maxTokens: 300,

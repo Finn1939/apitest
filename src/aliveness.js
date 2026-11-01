@@ -64,7 +64,8 @@ export function buildCurrentState(now = new Date(), lastSpokeAt = Date.now()) {
 }
 
 export function renderAliveness(now = new Date(), lastSpokeAt = Date.now()) {
-  return ALIVENESS_BLOCK.replace("{{CURRENT_STATE}}", buildCurrentState(now, lastSpokeAt));
+  // Function form: buildCurrentState output must be inserted literally.
+  return ALIVENESS_BLOCK.replace("{{CURRENT_STATE}}", () => buildCurrentState(now, lastSpokeAt));
 }
 
 export async function deliverReply(message, answer, { lastSpokeAtRef, spontaneous = false } = {}) {
