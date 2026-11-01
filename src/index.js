@@ -368,6 +368,7 @@ client.on(Events.MessageCreate, async (message) => {
 
   await message.channel.sendTyping();
   try {
+    let answer;
     if (replyTarget && isReplyIdentityQuestion(prompt)) {
       answer = replyTarget.isSelf
         ? "You're replying to me, Teacher-san."
@@ -378,7 +379,6 @@ client.on(Events.MessageCreate, async (message) => {
       rememberOwnMessage(message, answer);
       return;
     }
-    let answer;
     let delivered = false;
     const rememberedFact = !command ? parseRememberCommand(prompt) : null;
     if (rememberedFact) {
