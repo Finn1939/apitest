@@ -1,15 +1,9 @@
-import OpenAI from "openai";
 import { config } from "./config.js";
+import { keyPool } from "./keys.js";
 
-function createClient() {
-  return new OpenAI({
-    apiKey: config.aiApiKey,
-    baseURL: config.aiApiUrl.replace(/\/chat\/completions\/?$/, ""),
-  });
-}
-
-async function wait(milliseconds) {
-  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+function retryAfterSeconds(error) {
+  const retryAfter = Number(error?.headers?.["retry-after"]);
+  return Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter : 60;
 }
 
 export async function completeAI({
@@ -19,10 +13,11 @@ export async function completeAI({
   temperature = 1,
   topP = 0.95,
 }) {
-  const client = createClient();
+  let lastError;
   for (let attempt = 0; attempt < 6; attempt += 1) {
+    const entry = await keyPool.acquire();
     try {
-      const response = await client.chat.completions.create({
+      const response = await entry.client.chat.completions.create({
         model: config.aiModel,
         messages,
         max_tokens: maxTokens,
@@ -32,14 +27,24 @@ export async function completeAI({
       });
       return response.choices[0]?.message?.content?.trim() || "";
     } catch (error) {
-      if (error.status === 429 || error.status >= 500) {
-        await wait((500 * (2 ** attempt)) + Math.floor(Math.random() * 250));
+      lastError = error;
+      if (error?.status === 429) {
+        keyPool.markRateLimited(entry, retryAfterSeconds(error));
         continue;
+      }
+      if (error?.status >= 500) {
+        // Transient server error: cool this key briefly, next attempt uses another key.
+        keyPool.markRateLimited(entry, 0.5 * (2 ** attempt));
+        continue;
+      }
+      if (error?.status === 401 || error?.status === 403) {
+        keyPool.markDead(entry);
+        if (keyPool.aliveCount() > 0) continue;
       }
       throw error;
     }
   }
-  throw new Error("NVIDIA API rate limit: retries exhausted");
+  throw new Error(`NVIDIA API request failed after retries: ${lastError?.message ?? "unknown error"}`);
 }
 
 export async function askAI({ prompt, personality, systemContext = "", conversation = [] }) {
@@ -56,7 +61,8 @@ export async function askAI({ prompt, personality, systemContext = "", conversat
     ...conversation,
     { role: "user", content: prompt },
   ];
-  const answer = await completeAI({ messages, thinking: true, maxTokens: 16_384 });
+  // Live replies: thinking OFF and a sane token cap — same model, much faster.
+  const answer = await completeAI({ messages, thinking: false, maxTokens: 512 });
   if (!answer) throw new Error("NVIDIA API returned an empty response");
   return answer;
 }

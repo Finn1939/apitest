@@ -20,11 +20,12 @@ export function createMemoryDb(filePath) {
       content TEXT NOT NULL,
       created_at INTEGER NOT NULL,
       importance REAL NOT NULL DEFAULT 0.5,
-      summarized INTEGER NOT NULL DEFAULT 0
+      summarized INTEGER NOT NULL DEFAULT 0,
+      guild_id TEXT NOT NULL DEFAULT ''
     );
-    CREATE TABLE IF NOT EXISTS vec_messages (
+    CREATE VIRTUAL TABLE IF NOT EXISTS vec_messages_v USING vec0(
       message_id INTEGER PRIMARY KEY,
-      embedding BLOB NOT NULL
+      embedding float[384]
     );
     CREATE TABLE IF NOT EXISTS facts (
       id INTEGER PRIMARY KEY,
@@ -58,6 +59,11 @@ export function createMemoryDb(filePath) {
       affinity REAL NOT NULL DEFAULT 0,
       notes TEXT NOT NULL DEFAULT ''
     );
+    CREATE TABLE IF NOT EXISTS journal (
+      id INTEGER PRIMARY KEY,
+      entry TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
   `);
 
   db.exec(`
@@ -79,6 +85,36 @@ export function createMemoryDb(filePath) {
   if (!db.prepare("SELECT persona FROM self_model WHERE id = 1").get()) {
     db.prepare("INSERT INTO self_model(id, persona, updated_at) VALUES (1, ?, ?)")
       .run("just joined this server and is getting to know everyone", Date.now());
+  }
+
+  // One-time migrations for databases created by older versions.
+  if (db.pragma("user_version", { simple: true }) < 2) {
+    const columns = db.prepare("PRAGMA table_info(messages)").all();
+    if (!columns.some((column) => column.name === "guild_id")) {
+      db.exec("ALTER TABLE messages ADD COLUMN guild_id TEXT NOT NULL DEFAULT ''");
+    }
+    // Move legacy BLOB embeddings into the real vec0 virtual table, then drop it.
+    const legacyVec = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'vec_messages'",
+    ).get();
+    if (legacyVec) {
+      db.prepare(`
+        INSERT INTO vec_messages_v(message_id, embedding)
+        SELECT message_id, embedding FROM vec_messages WHERE length(embedding) = 1536
+      `).run();
+      db.exec("DROP TABLE vec_messages");
+    }
+    // Re-key legacy display-name fact subjects to stable Discord user IDs where possible.
+    db.exec(`
+      UPDATE facts SET subject = 'user:' || COALESCE(
+        (SELECT m.author_id FROM messages m
+         WHERE m.author_name = substr(facts.subject, 6)
+         ORDER BY m.id DESC LIMIT 1),
+        substr(facts.subject, 6)
+      )
+      WHERE subject LIKE 'user:%'
+    `);
+    db.pragma("user_version = 2");
   }
   return db;
 }

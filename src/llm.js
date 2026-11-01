@@ -1,21 +1,54 @@
-export async function streamNvidiaReply(client, { messages, onDelta, abortSignal }) {
-  const stream = await client.chat.completions.create({
-    model: process.env.AI_MODEL || "nvidia/nemotron-3.5-super-vl-120b-a12b",
-    messages,
-    max_tokens: 512,
-    temperature: 1,
-    top_p: 0.95,
-    stream: true,
-    chat_template_kwargs: { enable_thinking: false },
-  }, { signal: abortSignal });
+import { config } from "./config.js";
+import { keyPool } from "./keys.js";
 
-  let content = "";
-  for await (const chunk of stream) {
-    const delta = chunk.choices[0]?.delta?.content;
-    if (delta) {
-      content += delta;
-      onDelta(delta);
+// Streaming replies over the key pool — same model, thinking disabled, so
+// tokens can be pushed to Discord while they are generated.
+export async function streamReply({
+  messages,
+  onDelta = () => {},
+  abortSignal,
+  maxTokens = 512,
+  temperature = 1,
+  topP = 0.95,
+}) {
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const entry = await keyPool.acquire();
+    let emitted = false;
+    try {
+      const stream = await entry.client.chat.completions.create({
+        model: config.aiModel,
+        messages,
+        max_tokens: maxTokens,
+        temperature,
+        top_p: topP,
+        stream: true,
+        chat_template_kwargs: { enable_thinking: false },
+      }, { signal: abortSignal });
+      let content = "";
+      for await (const chunk of stream) {
+        const delta = chunk.choices[0]?.delta?.content;
+        if (delta) {
+          emitted = true;
+          content += delta;
+          onDelta(delta, content);
+        }
+      }
+      return content;
+    } catch (error) {
+      lastError = error;
+      // Never restart a stream that already produced output — it would duplicate text.
+      if (emitted || error?.name === "AbortError") throw error;
+      if (error?.status === 429) {
+        keyPool.markRateLimited(entry, 60);
+        continue;
+      }
+      if (error?.status >= 500) {
+        keyPool.markRateLimited(entry, 0.5 * (2 ** attempt));
+        continue;
+      }
+      throw error;
     }
   }
-  return content;
+  throw new Error(`NVIDIA streaming failed after retries: ${lastError?.message ?? "unknown error"}`);
 }

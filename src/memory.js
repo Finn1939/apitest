@@ -56,28 +56,30 @@ export function truncateTokens(text, maxTokens) {
 
 export function logMessage(db, message) {
   return db.prepare(`
-    INSERT INTO messages(channel_id, author_id, author_name, content, created_at)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO messages(channel_id, author_id, author_name, content, created_at, guild_id)
+    VALUES (?, ?, ?, ?, ?, ?)
   `).run(
     message.channelId,
     message.authorId,
     message.authorName || message.authorId,
     message.content,
     message.createdAt || Date.now(),
+    message.guildId || "",
   ).lastInsertRowid;
 }
 
-export function buildContext(db, { message, embedVector, personalityPath = "personality.txt" }) {
+export function buildContext(db, { message, embedVector, personalityPath = "personality.txt", deepRecall = false }) {
   const personality = truncateTokens(readFileSync(personalityPath, "utf8").trim(), 500);
   const selfModel = truncateTokens(
     db.prepare("SELECT persona FROM self_model WHERE id = 1").get()?.persona || "",
     200,
   );
+  // Facts are keyed by stable Discord user ID, so they survive nickname changes.
   const speakerFacts = db.prepare(`
     SELECT fact, confidence FROM facts
     WHERE subject = ?
     ORDER BY hits DESC, last_seen DESC
-  `).all(`user:${message.authorName}`).slice(0, 12);
+  `).all(`user:${message.authorId}`).slice(0, 12);
   const factsText = truncateTokens(speakerFacts.map(({ fact, confidence }) =>
     `- [${confidence.toFixed(2)}] ${fact}`).join("\n"), 600);
 
@@ -91,39 +93,63 @@ export function buildContext(db, { message, embedVector, personalityPath = "pers
     SELECT summary FROM summaries WHERE channel_id = ? ORDER BY created_at DESC LIMIT 2
   `).all(message.channelId).map(({ summary }) => summary).join("\n");
 
-  const relevant = [];
-  if (message.content.length > 2) {
-    const escaped = message.content.replace(/"/g, '""');
+  const relevantColumns = "m.id, m.author_name, m.content, m.importance, m.created_at, m.guild_id";
+  const guildClause = message.guildId ? "AND (m.guild_id = ? OR m.guild_id = '')" : "";
+  const ranked = new Map();
+  const addRanked = (rows) => rows.forEach((row, rank) => {
+    const entry = ranked.get(row.id);
+    if (entry) entry.score += 1 / (60 + rank + 1);
+    else ranked.set(row.id, { row, score: 1 / (60 + rank + 1) });
+  });
+
+  // Keyword leg: search meaningful words instead of the whole sentence as one phrase.
+  const terms = [...new Set((message.content.toLowerCase().match(/[a-z0-9']{4,}/g) || []))].slice(0, 8);
+  if (terms.length) {
     try {
-      const rows = db.prepare(`
-        SELECT m.id, m.author_name, m.content, m.importance, m.created_at
+      const ftsQuery = terms.map((term) => `"${term}"`).join(" OR ");
+      const ftsSql = `
+        SELECT ${relevantColumns}
         FROM fts_messages
         JOIN messages m ON m.id = fts_messages.rowid
-        WHERE fts_messages MATCH ?
-        LIMIT 8
-      `).all(`"${escaped}"`);
-      relevant.push(...rows);
+        WHERE fts_messages MATCH ? ${guildClause}
+        LIMIT 12
+      `;
+      const ftsRows = message.guildId
+        ? db.prepare(ftsSql).all(ftsQuery, message.guildId)
+        : db.prepare(ftsSql).all(ftsQuery);
+      addRanked(ftsRows);
     } catch {
       // FTS query syntax can vary with user input; normal conversation still works.
     }
   }
-  if (embedVector) {
+
+  // Semantic leg: true KNN over the sqlite-vec virtual table.
+  if (embedVector?.length === 384) {
     try {
-      const vectorRows = db.prepare(`
-        SELECT message_id AS id FROM vec_messages
-      `).all();
-      if (vectorRows.length) relevant.push(...db.prepare(`
-        SELECT m.id, m.author_name, m.content, m.importance, m.created_at
-        FROM messages m JOIN vec_messages v ON v.message_id = m.id
-        WHERE m.content != '' LIMIT 0
-      `).all());
+      const k = deepRecall ? 24 : 12;
+      const vecRows = db.prepare(`
+        SELECT ${relevantColumns}
+        FROM (SELECT message_id, distance FROM vec_messages_v WHERE embedding MATCH ? AND k = ${k}) v
+        JOIN messages m ON m.id = v.message_id
+      `).all(Buffer.from(new Float32Array(embedVector).buffer));
+      addRanked(vecRows);
     } catch {
       // Retrieval remains useful through FTS when vector search is unavailable.
     }
   }
 
-  const uniqueRelevant = [...new Map(relevant.map((row) => [row.id, row])).values()]
-    .sort((a, b) => b.created_at - a.created_at).slice(0, 8);
+  const now = Date.now();
+  const uniqueRelevant = [...ranked.values()]
+    .filter(({ row }) => !message.guildId || !row.guild_id || row.guild_id === message.guildId)
+    .map(({ row, score }) => ({
+      row,
+      score: score * 0.7
+        + 0.2 * Math.exp(-(now - row.created_at) / (30 * 24 * 60 * 60 * 1000))
+        + 0.1 * (row.importance ?? 0.5),
+    }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, deepRecall ? 16 : 8)
+    .map(({ row }) => row);
   const relevantText = truncateTokens(
     [summaries, ...uniqueRelevant.map((row) => `${row.author_name}: ${row.content}`)].filter(Boolean).join("\n"),
     1200,

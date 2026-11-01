@@ -5,7 +5,6 @@ import { parseCommand } from "./commands.js";
 import { askAI } from "./ai.js";
 import { searchWeb } from "./search.js";
 import {
-  HISTORY_LIMIT,
   addFact,
   addHistory,
   loadMemory,
@@ -15,8 +14,9 @@ import {
   logMessage,
 } from "./memory.js";
 import { createMemoryDb } from "./db.js";
-import { createJobs } from "./jobs.js";
-import { deliverReply, renderAliveness } from "./aliveness.js";
+import { createJobs, embedText } from "./jobs.js";
+import { streamReply } from "./llm.js";
+import { deliverReply, deliverStreamedReply, renderAliveness } from "./aliveness.js";
 
 validateConfig();
 
@@ -51,7 +51,6 @@ const lastSpokeAtRef = { value: Date.now() };
 
 setInterval(() => {
   console.log(`RSS: ${process.memoryUsage().rss} bytes`);
-  jobs.decay();
 }, 10 * 60_000).unref();
 
 function persistMemory() {
@@ -73,6 +72,20 @@ function rememberBotMessage(channelId, answer) {
   const history = conversations.get(channelId) || [];
   conversations.set(channelId, addHistory(history, { role: "assistant", content: answer }));
   persistMemory();
+}
+
+// Log her own replies into the persistent memory so she remembers what she said.
+function rememberOwnMessage(messageLike, answer) {
+  if (!answer) return;
+  const loggedId = logMessage(memoryDb, {
+    channelId: messageLike.channel.id,
+    authorId: client.user.id,
+    authorName: client.user.username,
+    content: answer,
+    createdAt: Date.now(),
+    guildId: messageLike.guild?.id || "",
+  });
+  jobs.enqueueEmbedding(loggedId, answer);
 }
 
 function rememberUserMessage(channelId, displayName, content) {
@@ -102,6 +115,7 @@ async function sendSpontaneousMessage(channel) {
   });
   spontaneousReplies.set(channel.id, Date.now());
   rememberBotMessage(channel.id, answer);
+  rememberOwnMessage({ channel, guild: channel.guild }, answer);
 }
 
 function scheduleSpontaneousMessages() {
@@ -128,8 +142,14 @@ client.once(Events.ClientReady, (readyClient) => {
     { name: "reflect_now", description: "Run a self-reflection immediately" },
   ]).catch((error) => console.error("Failed to register memory commands:", error));
   scheduleSpontaneousMessages();
+  // Warm the local embedding model so the first live reply is not slow.
+  jobs.backgroundQueue.add(() => embedText("warmup")).catch(() => {});
   setInterval(() => jobs.backgroundQueue.add(() => jobs.reflect()), 7 * 24 * 60 * 60_000).unref();
-  setInterval(() => jobs.backgroundQueue.add(() => jobs.decay()), 24 * 60 * 60_000).unref();
+  // Daily housekeeping: fact decay (once a day, not every 10 minutes) + nightly journal.
+  setInterval(() => jobs.backgroundQueue.add(async () => {
+    jobs.decay();
+    await jobs.writeJournal();
+  }), 24 * 60 * 60_000).unref();
 });
 
 function isAdmin(interaction) {
@@ -143,18 +163,19 @@ client.on(Events.InteractionCreate, async (interaction) => {
   if (interaction.commandName === "memory_stats") {
     const messages = memoryDb.prepare("SELECT COUNT(*) AS count FROM messages").get().count;
     const facts = memoryDb.prepare("SELECT COUNT(*) AS count FROM facts").get().count;
+    const journal = memoryDb.prepare("SELECT COUNT(*) AS count FROM journal").get().count;
     const last = memoryDb.prepare("SELECT MAX(created_at) AS value FROM summaries").get().value;
     const model = memoryDb.prepare("SELECT updated_at FROM self_model WHERE id = 1").get();
-    await interaction.editReply(`Messages: ${messages}\nFacts: ${facts}\nLast consolidation: ${last ? new Date(last).toISOString() : "never"}\nSelf-model age: ${Math.round((Date.now() - model.updated_at) / 36e5)} hours`);
+    await interaction.editReply(`Messages: ${messages}\nFacts: ${facts}\nJournal entries: ${journal}\nLast consolidation: ${last ? new Date(last).toISOString() : "never"}\nSelf-model age: ${Math.round((Date.now() - model.updated_at) / 36e5)} hours`);
   } else if (interaction.commandName === "memories") {
     const user = interaction.options.getUser("user");
     const rows = memoryDb.prepare(`
       SELECT fact FROM facts WHERE subject = ? ORDER BY hits DESC, last_seen DESC LIMIT 20
-    `).all(`user:${user.username}`);
+    `).all(`user:${user.id}`);
     await interaction.editReply(rows.length ? rows.map(({ fact }) => `- ${fact}`).join("\n") : "No memories for that user.");
   } else if (interaction.commandName === "forget_all") {
     const user = interaction.options.getUser("user");
-    memoryDb.prepare("DELETE FROM facts WHERE subject = ?").run(`user:${user.username}`);
+    memoryDb.prepare("DELETE FROM facts WHERE subject = ?").run(`user:${user.id}`);
     await interaction.editReply(`Forgot facts for ${user.username}.`);
   } else {
     await jobs.backgroundQueue.add(() => jobs.reflect());
@@ -189,6 +210,7 @@ client.on(Events.MessageCreate, async (message) => {
     authorName: message.member?.displayName || message.author.username,
     content: message.content,
     createdAt: message.createdTimestamp,
+    guildId: message.guild?.id || "",
   });
   jobs.enqueueEmbedding(loggedId, message.content);
   const pending = (pendingByChannel.get(message.channel.id) || 0) + 1;
@@ -219,6 +241,7 @@ client.on(Events.MessageCreate, async (message) => {
         updateAffinity(message.author.id);
         spontaneousReplies.set(message.channel.id, Date.now());
         rememberBotMessage(message.channel.id, answer);
+        rememberOwnMessage(message, answer);
       }
     } catch (error) {
       console.error("Unprompted reply failed:", error);
@@ -236,6 +259,7 @@ client.on(Events.MessageCreate, async (message) => {
   await message.channel.sendTyping();
   try {
     let answer;
+    let delivered = false;
     const rememberedFact = !command ? parseRememberCommand(prompt) : null;
     if (rememberedFact) {
       const facts = channelFacts.get(message.channel.id) || [];
@@ -247,43 +271,64 @@ client.on(Events.MessageCreate, async (message) => {
       channelFacts.delete(message.channel.id);
       persistMemory();
       answer = "Channel memory cleared.";
+    } else if (command !== null) {
+      const results = await searchWeb(prompt);
+      const context = results.length
+        ? `Use these current search results as supporting information. Include a source link when useful:\n${results
+          .map((result, index) => `${index + 1}. ${result.title}\n${result.snippet}\n${result.url}`)
+          .join("\n\n")}`
+        : "No useful search result was found. Answer from reliable general knowledge and be clear that the web search returned no match.";
+      answer = await askAI({
+        prompt,
+        personality: config.personality,
+        systemContext: `${renderAliveness(new Date(), lastSpokeAtRef.value)}\n${context}`,
+      });
     } else {
-      if (command !== null) {
-        const results = await searchWeb(prompt);
-        const context = results.length
-          ? `Use these current search results as supporting information. Include a source link when useful:\n${results
-            .map((result, index) => `${index + 1}. ${result.title}\n${result.snippet}\n${result.url}`)
-            .join("\n\n")}`
-          : "No useful search result was found. Answer from reliable general knowledge and be clear that the web search returned no match.";
-        answer = await askAI({
-          prompt,
-          personality: config.personality,
-          systemContext: `${renderAliveness(new Date(), lastSpokeAtRef.value)}\n${context}`,
-        });
-      } else {
-        const historyKey = message.channel.id;
-        const history = conversations.get(historyKey) || [];
-        const factsContextText = factsContext(historyKey);
-        const persistentContext = buildContext(memoryDb, {
-          message: {
-            channelId: message.channel.id,
-            authorId: message.author.id,
-            authorName: message.member?.displayName || message.author.username,
-            content: prompt,
-          },
-          personalityPath: config.personalityPath,
-        });
-        answer = await askAI({
-          prompt,
-          personality: config.personality,
-          systemContext: `${renderAliveness(new Date(), lastSpokeAtRef.value)}\n${factsContextText}\n${persistentContext.memoryBlock}`,
-          conversation: history.slice(0, -1).slice(-HISTORY_LIMIT),
-        });
+      // Memory-rich chat reply: hybrid retrieval + streamed delivery.
+      const factsContextText = factsContext(message.channel.id);
+      const deepRecall = /\b(remember|that time|back when|used to|last week|yesterday|earlier)\b/i.test(prompt);
+      let embedVector = null;
+      try {
+        embedVector = await embedText(prompt);
+      } catch {
+        // FTS-only retrieval still works if the local embedder fails.
       }
+      const persistentContext = buildContext(memoryDb, {
+        message: {
+          channelId: message.channel.id,
+          authorId: message.author.id,
+          authorName: message.member?.displayName || message.author.username,
+          content: prompt,
+          guildId: message.guild?.id || "",
+        },
+        embedVector,
+        deepRecall,
+        personalityPath: config.personalityPath,
+      });
+      const messages = [
+        {
+          role: "system",
+          content: [
+            `Your personality: ${config.personality}`,
+            "Reply conversationally and naturally, like chatting with a friend on Discord.",
+            "Use Discord-friendly formatting and keep replies concise.",
+            renderAliveness(new Date(), lastSpokeAtRef.value),
+            factsContextText,
+            persistentContext.memoryBlock,
+          ].filter(Boolean).join("\n"),
+        },
+        { role: "user", content: prompt },
+      ];
+      answer = await deliverStreamedReply(message, (onDelta) => streamReply({ messages, onDelta }), {
+        lastSpokeAtRef,
+      });
+      delivered = true;
     }
-    await deliverReply(message, answer, { lastSpokeAtRef });
+    if (!answer) return;
+    if (!delivered) await deliverReply(message, answer, { lastSpokeAtRef });
     updateAffinity(message.author.id);
     rememberBotMessage(message.channel.id, answer);
+    rememberOwnMessage(message, answer);
   } catch (error) {
     console.error(error);
     await message.reply("My brain tripped for a second. Please try again.");

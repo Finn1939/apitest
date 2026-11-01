@@ -12,10 +12,22 @@ const message = {
   authorId: "smoke-user",
   authorName: "Smoke User",
   content: "Testing memory",
+  guildId: "smoke-guild",
 };
-logMessage(db, message);
-const context = buildContext(db, { message, personalityPath: "personality.txt" });
+const loggedId = logMessage(db, message);
+
+// Verify the vec0 virtual table accepts embeddings and answers KNN queries.
+const fakeVector = Array.from({ length: 384 }, () => 0.1);
+db.prepare("INSERT INTO vec_messages_v(message_id, embedding) VALUES (?, ?)")
+  .run(BigInt(loggedId), Buffer.from(new Float32Array(fakeVector).buffer));
+const knn = db.prepare("SELECT message_id, distance FROM vec_messages_v WHERE embedding MATCH ? AND k = 1")
+  .all(Buffer.from(new Float32Array(fakeVector).buffer));
+if (knn.length !== 1 || Number(knn[0].message_id) !== Number(loggedId)) {
+  throw new Error("vec0 KNN round-trip failed");
+}
+
+const context = buildContext(db, { message, embedVector: fakeVector, personalityPath: "personality.txt" });
 if (!context.memoryBlock.includes("Testing memory")) throw new Error("Memory round-trip failed");
-console.log(`Memory round-trip passed; RSS: ${process.memoryUsage().rss} bytes`);
+console.log(`Memory + vector round-trip passed; RSS: ${process.memoryUsage().rss} bytes`);
 db.close();
 rmSync(directory, { recursive: true });

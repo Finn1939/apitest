@@ -26,10 +26,16 @@ may also receive a random emoji reaction.
 
 ## Persistent memory
 
-All visible messages are stored immediately in `memory.db`. Embeddings are
-generated locally by `@huggingface/transformers` and searched alongside FTS5
-text matches. Summaries and facts are consolidated in the background, while
-live replies are left unaffected by memory jobs.
+All visible messages are stored immediately in `memory.db`, including the bot's
+own replies. Embeddings are generated locally by `@huggingface/transformers`
+(all-MiniLM-L6-v2, 384 dimensions) and semantic KNN search runs through the
+`sqlite-vec` virtual table, fused with FTS5 keyword matches and scored by
+relevance, recency, and importance. Retrieval is scoped per guild so memories
+never leak across servers. Durable facts are keyed by Discord user ID,
+reinforced (not duplicated) when re-observed, and decay only once per day.
+When someone asks about the past ("remember", "back when", ...), retrieval
+digs deeper automatically. Summaries and facts are consolidated in the
+background, and a nightly journal entry feeds the weekly self-reflection.
 
 Keep these files outside deployment archive replacement:
 
@@ -43,6 +49,7 @@ Configured environment variables include:
 - `DB_PATH`
 - `PERSONALITY_PATH`
 - `ADMIN_USER_IDS`
+- `NVIDIA_API_KEYS` (optional key pool, comma-separated)
 
 Admin-only slash commands are `/memory_stats`, `/memories`, `/forget_all`, and
 `/reflect_now`.
@@ -53,8 +60,20 @@ To run the memory round-trip smoke test:
 npm run smoke
 ```
 
-Memory embeddings use NVIDIA's `/embeddings` API, so the bot does not load a
-local ONNX model. RSS is logged every 10 minutes and should remain below 550 MB.
+Embeddings run locally (no embedding API calls). The only external calls are
+chat completions against the model configured in `AI_MODEL` (default
+`nvidia/nemotron-3.5-super-vl-120b-a12b` on build.nvidia.com). Live replies
+stream token-by-token with thinking disabled for speed; background jobs
+(consolidation, reflection, journal) run with thinking enabled. RSS is logged
+every 10 minutes and should remain below 550 MB.
+
+## API keys
+
+Set a single key with `NVIDIA_API_KEY`, or a comma-separated pool with
+`NVIDIA_API_KEYS=key1,key2,key3` to spread requests across several keys. The
+pool round-robins requests, spaces them out to stay under each key's rate
+limit, cools a key down on 429 (respecting Retry-After), and disables keys
+that return 401/403. All keys hit the same model and endpoint.
 
 ## Usage
 

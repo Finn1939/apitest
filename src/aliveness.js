@@ -85,3 +85,47 @@ export async function deliverReply(message, answer, { lastSpokeAtRef, spontaneou
     }
   }
 }
+
+// Streams a reply into Discord by editing one message as tokens arrive, so the
+// character appears to type in real time. Returns the final text, or "" if the
+// stream failed (a fallback message is sent in that case).
+export async function deliverStreamedReply(message, produce, { lastSpokeAtRef } = {}) {
+  let sent = null;
+  try {
+    await message.channel.sendTyping();
+    sent = await message.reply("…");
+    let buffer = "";
+    let lastEdit = 0;
+    const finalText = await produce((delta) => {
+      buffer += delta;
+      const now = Date.now();
+      if (now - lastEdit >= 1500 && buffer.trim()) {
+        lastEdit = now;
+        sent.edit(buffer.slice(0, 2000)).catch(() => {});
+      }
+    });
+    const text = (finalText || buffer).trim().slice(0, 2000);
+    if (!text) throw new Error("empty stream");
+    await sent.edit(text);
+    if (lastSpokeAtRef) lastSpokeAtRef.value = Date.now();
+    const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
+    if (wordCount <= 8 && Math.random() < 1 / 6) {
+      try {
+        await message.react(["🙂", "👀", "✨", "😄", "🫡"][Math.floor(Math.random() * 5)]);
+      } catch {
+        // Reactions are best-effort.
+      }
+    }
+    return text;
+  } catch (error) {
+    console.error("Streamed reply failed:", error);
+    const fallback = "My brain tripped for a second. Please try again.";
+    try {
+      if (sent) await sent.edit(fallback);
+      else await message.reply(fallback);
+    } catch {
+      // Give up quietly; the outer handler already logged the failure.
+    }
+    return "";
+  }
+}
