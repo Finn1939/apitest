@@ -17,6 +17,7 @@ import { createMemoryDb } from "./db.js";
 import { createJobs, embedText } from "./jobs.js";
 import { streamReply } from "./llm.js";
 import { deliverReply, deliverStreamedReply, renderAliveness } from "./aliveness.js";
+import { renderDiscordMentions } from "./render.js";
 
 validateConfig();
 
@@ -123,6 +124,7 @@ function rememberOwnMessage(messageLike, answer) {
     channelId: messageLike.channel.id,
     authorId: client.user.id,
     authorName: client.user.username,
+    username: client.user.username,
     content: answer,
     createdAt: Date.now(),
     guildId: messageLike.guild?.id || "",
@@ -243,15 +245,25 @@ client.on(Events.MessageCreate, async (message) => {
     }
   }
 
+  // Render Discord markup into readable text before the model or her memory
+  // ever sees it: <@123> becomes @Display name, <#456> becomes #channel.
+  const mentionLookups = {
+    users: message.mentions.users,
+    roles: message.mentions.roles,
+    channels: message.mentions.channels,
+  };
+  const renderedContent = renderDiscordMentions(message.content, mentionLookups);
+
   const loggedId = logMessage(memoryDb, {
     channelId: message.channel.id,
     authorId: message.author.id,
     authorName: message.member?.displayName || message.author.username,
-    content: message.content,
+    username: message.author.username,
+    content: renderedContent,
     createdAt: message.createdTimestamp,
     guildId: message.guild?.id || "",
   });
-  jobs.enqueueEmbedding(loggedId, message.content);
+  jobs.enqueueEmbedding(loggedId, renderedContent);
   const pending = (pendingByChannel.get(message.channel.id) || 0) + 1;
   pendingByChannel.set(message.channel.id, pending);
   if (pending >= 100) {
@@ -259,7 +271,8 @@ client.on(Events.MessageCreate, async (message) => {
     jobs.backgroundQueue.add(() => jobs.consolidate(message.channel.id));
   }
 
-  rememberUserMessage(message.channel.id, message.member?.displayName || message.author.username, message.content);
+  const displayName = message.member?.displayName || message.author.username;
+  rememberUserMessage(message.channel.id, displayName, renderedContent);
 
   const mentioned = message.mentions.has(client.user);
   const command = parseCommand(message.content, config.prefix);
@@ -272,7 +285,7 @@ client.on(Events.MessageCreate, async (message) => {
     await message.channel.sendTyping();
     try {
       const answer = await askAI({
-        prompt: `Someone in Discord said: "${message.content}". React naturally, only if there is a reason to join in. If you would add nothing useful, answer exactly: NO_REPLY.`,
+        prompt: `Someone in Discord said: "${renderedContent}". React naturally, only if there is a reason to join in. If you would add nothing useful, answer exactly: NO_REPLY.`,
         personality: config.personality,
         systemContext: renderAliveness(new Date(), lastSpokeAtRef.value),
       });
@@ -289,8 +302,12 @@ client.on(Events.MessageCreate, async (message) => {
     return;
   }
 
-  const prompt = command ?? message.content.replaceAll(`<@${client.user.id}>`, "")
-    .replaceAll(`<@!${client.user.id}>`, "").trim();
+  const stripped = message.content
+    .replaceAll(`<@${client.user.id}>`, "")
+    .replaceAll(`<@!${client.user.id}>`, "");
+  const prompt = command !== null
+    ? renderDiscordMentions(command, mentionLookups).trim()
+    : renderDiscordMentions(stripped, mentionLookups).trim();
   if (!prompt) {
     await message.reply("Hey! What do you want to talk about?");
     return;
@@ -337,13 +354,14 @@ client.on(Events.MessageCreate, async (message) => {
         message: {
           channelId: message.channel.id,
           authorId: message.author.id,
-          authorName: message.member?.displayName || message.author.username,
+          authorName: displayName,
           content: prompt,
           guildId: message.guild?.id || "",
         },
         embedVector,
         deepRecall,
         personalityPath: config.personalityPath,
+        botId: client.user.id,
       });
       const messages = [
         {

@@ -57,6 +57,13 @@ function affinityTier(affinity) {
   return "someone you barely know yet";
 }
 
+function timeAgo(timestamp) {
+  const minutes = Math.max(1, Math.floor((Date.now() - timestamp) / 60_000));
+  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 1440) return `${Math.floor(minutes / 60)}h ago`;
+  return `${Math.floor(minutes / 1440)}d ago`;
+}
+
 export function truncateTokens(text, maxTokens) {
   const value = String(text || "");
   const maxChars = maxTokens * 4;
@@ -65,41 +72,37 @@ export function truncateTokens(text, maxTokens) {
 
 export function logMessage(db, message) {
   return db.prepare(`
-    INSERT INTO messages(channel_id, author_id, author_name, content, created_at, guild_id)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO messages(channel_id, author_id, author_name, username, content, created_at, guild_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `).run(
     message.channelId,
     message.authorId,
     message.authorName || message.authorId,
+    message.username || "",
     message.content,
     message.createdAt || Date.now(),
     message.guildId || "",
   ).lastInsertRowid;
 }
 
-export function buildContext(db, { message, embedVector, personalityPath = "personality.txt", deepRecall = false }) {
+export function buildContext(db, { message, embedVector, personalityPath = "personality.txt", deepRecall = false, botId = "" }) {
   const personality = truncateTokens(readFileSync(personalityPath, "utf8").trim(), 500);
   const selfModel = truncateTokens(
     db.prepare("SELECT persona FROM self_model WHERE id = 1").get()?.persona || "",
     200,
   );
-  // Facts are keyed by stable Discord user ID, so they survive nickname changes.
-  const speakerFacts = db.prepare(`
-    SELECT fact, confidence FROM facts
-    WHERE subject = ?
-    ORDER BY hits DESC, last_seen DESC
-  `).all(`user:${message.authorId}`).slice(0, 12);
-  const factsText = truncateTokens(speakerFacts.length
-    ? `What you know about ${message.authorName || "them"} (the speaker):\n${speakerFacts.map(({ fact, confidence }) =>
-    `- [${confidence.toFixed(2)}] ${fact}`).join("\n")}`
-    : "", 600);
 
   // Who is speaking, how the bot feels about them, and when they last really talked.
   const speakerName = message.authorName || "Someone";
+  const speakerHandle = db.prepare(
+    "SELECT username FROM messages WHERE author_id = ? AND username != '' ORDER BY id DESC LIMIT 1"
+  ).get(message.authorId)?.username;
   const relationship = db.prepare(
     "SELECT affinity, last_interacted FROM relationships WHERE user_id = ?"
   ).get(message.authorId);
-  const speakerLines = [`${speakerName} is talking to you right now.`];
+  const speakerLines = [
+    `${speakerName}${speakerHandle ? ` (@${speakerHandle})` : ""} is talking to you right now.`,
+  ];
   if (relationship && (relationship.affinity > 0 || relationship.last_interacted > 0)) {
     speakerLines.push(`To you they feel like ${affinityTier(relationship.affinity)}.`);
     if (relationship.last_interacted > 0) {
@@ -111,6 +114,36 @@ export function buildContext(db, { message, embedVector, personalityPath = "pers
     speakerLines.push("You do not know them yet; this may be your first real exchange.");
   }
   const speakerText = speakerLines.join(" ");
+
+  // Roster of people the bot has actually seen in this server, with usernames,
+  // so "what's his username?" style questions can be answered.
+  const rosterRows = db.prepare(`
+    SELECT author_id, author_name,
+           COALESCE(NULLIF(username, ''), NULLIF(author_name, ''), author_id) AS handle,
+           MAX(created_at) AS last_active
+    FROM messages
+    WHERE created_at >= ? AND author_id != ? AND (guild_id = ? OR guild_id = '')
+    GROUP BY author_id
+    ORDER BY last_active DESC
+    LIMIT 15
+  `).all(Date.now() - 30 * 86_400_000, botId || "", message.guildId || "");
+  const rosterText = rosterRows.length
+    ? rosterRows.map((row) => {
+        const hasHandle = row.handle !== row.author_name;
+        return `- ${row.author_name}${hasHandle ? ` (@${row.handle})` : ""} — last active ${timeAgo(row.last_active)}`;
+      }).join("\n")
+    : "";
+
+  // Facts are keyed by stable Discord user ID, so they survive nickname changes.
+  const speakerFacts = db.prepare(`
+    SELECT fact, confidence FROM facts
+    WHERE subject = ?
+    ORDER BY hits DESC, last_seen DESC
+  `).all(`user:${message.authorId}`).slice(0, 12);
+  const factsText = truncateTokens(speakerFacts.length
+    ? `What you know about ${speakerName} (the speaker):\n${speakerFacts.map(({ fact, confidence }) =>
+      `- [${confidence.toFixed(2)}] ${fact}`).join("\n")}`
+    : "", 600);
 
   const recent = db.prepare(`
     SELECT author_name, content FROM messages
@@ -186,6 +219,7 @@ export function buildContext(db, { message, embedVector, personalityPath = "pers
   const memoryBlock = PROMPT_A
     .replace("{{SELF_MODEL}}", selfModel)
     .replace("{{SPEAKER}}", speakerText)
+    .replace("{{ROSTER}}", rosterText || "You have not met anyone here yet.")
     .replace("{{USER_FACTS}}", factsText || `You know nothing about ${speakerName} yet.`)
     .replace("{{RELEVANT_MEMORIES}}", relevantText || "No relevant memories.")
     .replace("{{RECENT_MESSAGES}}", recentText || "No recent messages.");

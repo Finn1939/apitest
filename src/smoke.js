@@ -1,3 +1,4 @@
+// Offline round-trip: log → store → retrieve → build context. No network, no API keys.
 import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,27 +8,45 @@ import { logMessage, buildContext } from "./memory.js";
 const directory = join(tmpdir(), `apitest-smoke-${process.pid}`);
 mkdirSync(directory, { recursive: true });
 const db = createMemoryDb(join(directory, "memory.db"));
-const message = {
-  channelId: "smoke-channel",
-  authorId: "smoke-user",
-  authorName: "Smoke User",
-  content: "Testing memory",
-  guildId: "smoke-guild",
-};
-const loggedId = logMessage(db, message);
 
-// Verify the vec0 virtual table accepts embeddings and answers KNN queries.
-const fakeVector = Array.from({ length: 384 }, () => 0.1);
-db.prepare("INSERT INTO vec_messages_v(message_id, embedding) VALUES (?, ?)")
-  .run(BigInt(loggedId), Buffer.from(new Float32Array(fakeVector).buffer));
-const knn = db.prepare("SELECT message_id, distance FROM vec_messages_v WHERE embedding MATCH ? AND k = 1")
-  .all(Buffer.from(new Float32Array(fakeVector).buffer));
-if (knn.length !== 1 || Number(knn[0].message_id) !== Number(loggedId)) {
-  throw new Error("vec0 KNN round-trip failed");
+const ids = [
+  logMessage(db, {
+    channelId: "smoke-channel", authorId: "smoke-user", authorName: "Smoke User", username: "smoke_user",
+    content: "we built the pc together last month", createdAt: Date.now() - 3 * 86_400_000, guildId: "smoke-guild",
+  }),
+  logMessage(db, {
+    channelId: "smoke-channel", authorId: "smoke-user", authorName: "Smoke User", username: "smoke_user",
+    content: "do you remember the pc build?", createdAt: Date.now(), guildId: "smoke-guild",
+  }),
+];
+for (const id of ids) {
+  db.prepare("INSERT INTO vec_messages_v(message_id, embedding) VALUES (?, ?)")
+    .run(BigInt(id), Buffer.from(new Float32Array(new Array(384).fill(0.22)).buffer));
 }
+db.prepare("INSERT INTO facts(subject, fact, first_seen, last_seen) VALUES (?, ?, ?, ?)")
+  .run("user:smoke-user", "Smoke User is building a new PC", Date.now(), Date.now());
+db.prepare("INSERT INTO relationships(user_id, affinity, last_interacted) VALUES (?, ?, ?)")
+  .run("smoke-user", 2.3, Date.now() - 2 * 86_400_000);
 
-const context = buildContext(db, { message, embedVector: fakeVector, personalityPath: "personality.txt" });
-if (!context.memoryBlock.includes("Testing memory")) throw new Error("Memory round-trip failed");
-console.log(`Memory + vector round-trip passed; RSS: ${process.memoryUsage().rss} bytes`);
+const context = buildContext(db, {
+  message: {
+    channelId: "smoke-channel", authorId: "smoke-user", authorName: "Smoke User",
+    content: "do you remember the pc build?", guildId: "smoke-guild",
+  },
+  embedVector: new Array(384).fill(0.22),
+  deepRecall: true,
+  personalityPath: "personality.txt",
+  botId: "smoke-bot",
+});
+const needles = [
+  "Smoke User (@smoke_user) is talking to you right now",   // speaker recognition + handle
+  "a regular you are genuinely fond of",       // affinity tier
+  "building a new PC",                         // speaker facts
+  "pc together",                               // semantic recall of the old message
+];
+for (const needle of needles) {
+  if (!context.memoryBlock.includes(needle)) throw new Error(`Memory round-trip failed: missing "${needle}"`);
+}
+console.log(`Memory round-trip passed (retrieval + recognition); RSS: ${process.memoryUsage().rss} bytes`);
 db.close();
-rmSync(directory, { recursive: true });
+rmSync(directory, { recursive: true, force: true });

@@ -1,10 +1,14 @@
 import Database from "better-sqlite3";
+import { mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 const { getLoadablePath } = require("sqlite-vec");
 
 export function createMemoryDb(filePath) {
+  // The DB path may live in a folder that does not exist yet (e.g. /home/container/data).
+  mkdirSync(dirname(filePath), { recursive: true });
   const db = new Database(filePath);
   db.pragma("journal_mode = WAL");
   db.pragma("synchronous = NORMAL");
@@ -17,6 +21,7 @@ export function createMemoryDb(filePath) {
       channel_id TEXT NOT NULL,
       author_id TEXT NOT NULL,
       author_name TEXT NOT NULL,
+      username TEXT NOT NULL DEFAULT '',
       content TEXT NOT NULL,
       created_at INTEGER NOT NULL,
       importance REAL NOT NULL DEFAULT 0.5,
@@ -123,6 +128,13 @@ export function createMemoryDb(filePath) {
       db.exec("ALTER TABLE relationships ADD COLUMN last_interacted INTEGER NOT NULL DEFAULT 0");
     }
     db.pragma("user_version = 3");
+  }
+  if (db.pragma("user_version", { simple: true }) < 4) {
+    const msgColumns = db.prepare("PRAGMA table_info(messages)").all();
+    if (!msgColumns.some((column) => column.name === "username")) {
+      db.exec("ALTER TABLE messages ADD COLUMN username TEXT NOT NULL DEFAULT ''");
+    }
+    db.pragma("user_version = 4");
   }
   return db;
 }
