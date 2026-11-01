@@ -120,7 +120,9 @@ export function buildContext(db, { message, embedVector, personalityPath = "pers
     speakerLines.push(
       `They used Discord's reply on ${target}${replyTo.content ? ` — "${replyTo.content}"` : " (its text is unavailable)"}.`,
     );
-    if (!replyTo.isSelf) {
+    if (replyTo.isSelf) {
+      speakerLines.push("The user is replying to you, the bot. Pronouns such as \"you\" and \"your\" refer to you; pronouns such as \"I\" and \"me\" refer to the replying user.");
+    } else {
       speakerLines.push(`When they say "he", "him" or "his", they most likely mean ${replyTo.authorName}.`);
     }
   }

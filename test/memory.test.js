@@ -103,3 +103,26 @@ test("buildContext without a reply stays silent about replies", () => {
   assert.doesNotMatch(context.memoryBlock, /most likely mean/);
   rmSync(directory, { recursive: true, force: true });
 });
+
+test("buildContext identifies replies to the bot as self-replies", () => {
+  const directory = mkdtempSync(join(tmpdir(), "apitest-self-reply-"));
+  const db = createMemoryDb(join(directory, "memory.db"));
+  writeFileSync(join(directory, "personality.txt"), "You are a playful Discord companion.");
+
+  const context = buildContext(db, {
+    message: {
+      channelId: "channel-1",
+      authorId: "user-sprite",
+      authorName: "sprite vodka",
+      content: "how bout now?",
+      guildId: "guild-1",
+    },
+    personalityPath: join(directory, "personality.txt"),
+    botId: "bot-1",
+    replyTo: { authorName: "Teacher-san", isSelf: true, content: "karuta bby, newp", ageMs: 1_000 },
+  });
+
+  assert.match(context.memoryBlock, /your earlier message/);
+  assert.match(context.memoryBlock, /user is replying to you, the bot/);
+  rmSync(directory, { recursive: true, force: true });
+});
