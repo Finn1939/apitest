@@ -18,6 +18,7 @@ import { createJobs, embedText } from "./jobs.js";
 import { streamReply } from "./llm.js";
 import { deliverReply, deliverStreamedReply, renderAliveness } from "./aliveness.js";
 import { renderDiscordMentions } from "./render.js";
+import { isReplyIdentityQuestion } from "./replies.js";
 
 validateConfig();
 
@@ -81,10 +82,6 @@ function isGameCommand(content) {
 function isLearnedGameChannel(channelId) {
   const facts = channelFacts.get(channelId) || [];
   return facts.some((fact) => fact.includes("bot-game channel"));
-}
-
-function isReplyIdentityQuestion(prompt) {
-  return /^(?:who(?:'s|s|\s+is|\s+are)?\s+(?:this|that|now)|who(?:\s+am)?\s+i(?:'m)?\s+replying\s+to|which\s+(?:message|person|bot)\s+(?:am\s+i\s+)?replying\s+to)\s*[?!.]?$|^now\s+who\s*[?!.]?$/.test(prompt.toLowerCase());
 }
 
 // What message did they hit Discord's "reply" on? Without this, "his user"
