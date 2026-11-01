@@ -5,6 +5,7 @@ export function isReplyIdentityQuestion(prompt) {
     || /^how(?:\s+about| bout)?\s+(?:now|this\s+one|that\s+one)\s*[?!.]?$/.test(normalized)
     || /^what(?:\s+about)?\s+(?:this|that)\s+one\s*[?!.]?$/.test(normalized)
     || /^and\s+(?:this|that)\s+one\s*[?!.]?$/.test(normalized)
+    || /^and\s+(?:this|that)\s*[?!.]?$/.test(normalized)
     || /^this\s+one\s*[?!.]?$/.test(normalized)
     || /^that\s+one\s*[?!.]?$/.test(normalized);
 }
