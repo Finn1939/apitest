@@ -137,6 +137,75 @@ test("unparseable game judgments return null instead of nonsense", async () => {
   assert.equal(await weird.judgeGameMoment({ channelLabel: "c", gameBotName: "OwO", lines: "x", triggerCandidate: "" }), null);
 });
 
+test("chime-in judgment approves a natural opening and writes the line", async () => {
+  const completeAI = fakeCompleter([JSON.stringify({
+    speak: true,
+    line: "wait you guys finished the whole series without me?? 💀",
+    reason: "left out of the watch party",
+  })]);
+  const analyst = createAnalyst({ completeAI, maxPerMinute: 10, persona: "a teasing teacher" });
+  const verdict = await analyst.judgeChimeIn({
+    channelLabel: "general",
+    lines: "Ren: we started the new season last night\nsprite: ep 3 was insane",
+    peopleNotes: "- Ren: friendship — close friends",
+    worldNote: "It is 9:12 PM PHT.",
+    occasion: "someone just said something she overheard",
+  });
+  assert.equal(verdict.speak, true);
+  assert.ok(verdict.line.includes("series"));
+  assert.ok(verdict.reason.includes("watch party"));
+  const prompt = completeAI.calls[0].messages.map((m) => m.content).join("\n");
+  assert.ok(prompt.includes("ep 3 was insane")); // the conversation she overheard
+  assert.ok(prompt.includes("close friends")); // her bonds with the speakers
+  assert.ok(prompt.includes("teasing teacher")); // her voice for the line
+  assert.ok(prompt.includes("9:12 PM")); // time of day
+  assert.ok(prompt.includes("someone just said something she overheard"));
+});
+
+test("chime-in judgment can veto the dice roll", async () => {
+  const analyst = createAnalyst({
+    completeAI: fakeCompleter([JSON.stringify({ speak: false, line: "", reason: "private argument" })]),
+    maxPerMinute: 10,
+  });
+  const verdict = await analyst.judgeChimeIn({ channelLabel: "general", lines: "Ren: whatever\nsprite: fine." });
+  assert.equal(verdict.speak, false);
+  assert.equal(verdict.line, "");
+});
+
+test("chime-in speak=true without a usable line stays silent", async () => {
+  const analyst = createAnalyst({
+    completeAI: fakeCompleter([JSON.stringify({ speak: true, line: "   ", reason: "" })]),
+    maxPerMinute: 10,
+  });
+  const verdict = await analyst.judgeChimeIn({ channelLabel: "c", lines: "x" });
+  assert.equal(verdict.speak, false);
+  assert.equal(verdict.line, "");
+});
+
+test("unparseable chime-in judgments return null instead of nonsense", async () => {
+  const payload = { channelLabel: "c", lines: "x" };
+  const broken = createAnalyst({ completeAI: fakeCompleter(["nope"]), maxPerMinute: 10 });
+  assert.equal(await broken.judgeChimeIn(payload), null);
+  const down = createAnalyst({ completeAI: fakeCompleter([new Error("timeout")]), maxPerMinute: 10 });
+  assert.equal(await down.judgeChimeIn(payload), null);
+  const weird = createAnalyst({ completeAI: fakeCompleter(['{"speak":"yes","line":"hi"}']), maxPerMinute: 10 });
+  assert.equal(await weird.judgeChimeIn(payload), null);
+  assert.equal(down.stats.fallbacks, 1);
+});
+
+test("chime-in judgments share the same per-minute budget", async () => {
+  let now = 5_000_000;
+  const verdict = JSON.stringify({ speak: false, line: "", reason: "" });
+  const completeAI = fakeCompleter([verdict, verdict]);
+  const analyst = createAnalyst({ completeAI, maxPerMinute: 1, now: () => now });
+  assert.ok(await analyst.judgeChimeIn({ channelLabel: "c", lines: "x" }));
+  assert.equal(await analyst.judgeChimeIn({ channelLabel: "c", lines: "x" }), null); // budget spent
+  assert.equal(analyst.stats.skipped, 1);
+  now += 61_000;
+  assert.ok(await analyst.judgeChimeIn({ channelLabel: "c", lines: "x" }));
+  assert.equal(completeAI.calls.length, 2);
+});
+
 test("learned commands are validated against the trigger message", () => {
   assert.equal(validLearnedCommand("whl 500", "whl"), "whl");
   assert.equal(validLearnedCommand("gacha", "gacha"), "gacha");

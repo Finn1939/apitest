@@ -86,6 +86,16 @@ Beyond composing replies, the same model makes small structured judgments
   the panel, never a pointer word like "here"), and persist it to the
   `learned_commands` table. The game-traffic filter grows on its own — the
   "whl" fix, automated for the next game bot.
+- **Chime-in judgment** — her unprompted messages used to fire on a dice
+  roll alone: the in-flow path asked the reply model with almost no context,
+  the idle opener always sent a rotating opener. Now, when the roll hits,
+  the judgment module first decides whether the moment is worth joining and
+  writes the line — seeing the recent rendered conversation, her bonds with
+  the speakers, and the time of day. No natural opening (arguments, heavy
+  venting, nothing to add) means she stays quietly out of it; a failed
+  judgment falls back to the old behavior. Unprompted appearances now feel
+  earned instead of random, and a judgment-approved line skips the big
+  reply call entirely.
 
 Judgment calls share the 3-key pool with replies but have their own sliding
 budget (default 10 calls/min — about 8% of 120 RPM), so live replies always

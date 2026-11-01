@@ -1,7 +1,8 @@
 // --- AI judgment layer --------------------------------------------------------
 // Small, structured analysis calls that make her decisions smarter than
 // regexes: what an emoji reaction really meant, whether a game-channel moment
-// is worth one comment, which word triggered a game bot's panel.
+// is worth one comment, which word triggered a game bot's panel, whether an
+// overheard conversation is worth joining unprompted.
 //
 // Design rules that keep this safe next to live replies:
 // 1. Budget: judgment calls get their own sliding-window cap (default 10/min
@@ -177,6 +178,64 @@ export function createAnalyst({ completeAI, maxPerMinute = 10, persona = "", now
     }));
   }
 
+  // Decides whether she should chime in unprompted on a conversation she is
+  // only watching (nothing addressed to her). Returns { speak, line, reason }
+  // or null — null means "no verdict" and the caller falls back to the old
+  // dice-roll behavior.
+  async function judgeChimeIn({ channelLabel = "chat", lines = "", peopleNotes = "", worldNote = "", occasion = "someone just said something she overheard" }) {
+    if (!tryBudget()) {
+      stats.skipped += 1;
+      return null;
+    }
+    stats.calls += 1;
+    let raw;
+    try {
+      raw = await completeAI({
+        messages: [
+          { role: "system", content: JUDGE_SYSTEM_PROMPT },
+          {
+            role: "user",
+            content: [
+              "## Task",
+              `She is watching a Discord conversation in #${channelLabel} that is not addressed to her — ${occasion}. Decide whether she should send ONE unprompted message to join in, and if so, write it.`,
+              personaBlock(),
+              `## Recent conversation in the channel (oldest first; her own past messages are labeled [bot])\n${lines || "(nothing recent — the channel is quiet)"}`,
+              `## What she knows about the people involved\n${peopleNotes || "(all strangers so far)"}`,
+              worldNote ? `## Right now\n${worldNote}` : "",
+              [
+                "## Rules",
+                '- "speak": true ONLY when there is a genuinely natural opening — an ongoing topic she can add something real to, good news worth celebrating, banter she would naturally join, or a light question she could answer. When in doubt, false.',
+                "- She does NOT join arguments, heavy venting, or private-feeling conversations, and never chimes in just to say hi when she would add nothing.",
+                '- "line": the one message, max 200 characters, first person, in her own voice. Warm, teasing, human — calibrated to how close she is to these people. It must clearly connect to what is being discussed, never a generic opener, and never repeat anything she already said in the recent lines. At most one emoji.',
+                "- She never mentions being an AI or a bot, never uses commands, never sends more than one question.",
+                '- "reason": max 80 chars, why she should or should not speak.',
+              ].join("\n"),
+              '## Output (strict JSON)\n{"speak":true,"line":"wait you guys finished the whole series without me?? 💀","reason":"left out of the watch party"}',
+            ].filter(Boolean).join("\n\n"),
+          },
+        ],
+        thinking: false,
+        maxTokens: 300,
+        temperature: 0.8,
+      });
+    } catch {
+      stats.fallbacks += 1;
+      return null;
+    }
+    const parsed = extractJson(raw);
+    if (!parsed || typeof parsed.speak !== "boolean") {
+      stats.fallbacks += 1;
+      return null;
+    }
+    const line = cleanText(parsed.line, 200);
+    const speak = parsed.speak === true && Boolean(line);
+    return {
+      speak,
+      line: speak ? line : "",
+      reason: cleanText(parsed.reason, 120),
+    };
+  }
+
   // Decides whether she should send ONE spectator comment about a bot-game
   // moment (someone won/lost/bet big), and optionally which word triggered the
   // game bot's panel. Returns { speak, line, reason, learnedCommand } or null.
@@ -236,5 +295,5 @@ export function createAnalyst({ completeAI, maxPerMinute = 10, persona = "", now
     };
   }
 
-  return { interpretReactions, judgeGameMoment, stats };
+  return { interpretReactions, judgeChimeIn, judgeGameMoment, stats };
 }

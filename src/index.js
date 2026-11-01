@@ -265,16 +265,7 @@ async function flushReactions(channelId) {
       }
       groups.get(entry.messageId).reactions.push({ emoji: entry.emoji, who: entry.userName });
     }
-    const peopleNotes = [...new Set(batch.map((entry) => entry.userId))].map((userId) => {
-      const row = memoryDb.prepare(
-        "SELECT affinity, romance, last_interacted FROM relationships WHERE user_id = ?",
-      ).get(userId);
-      const name = displayNameFor(userId);
-      if (!row) return `- ${name}: no bond yet`;
-      const summary = relationshipSummary(row);
-      const romanceBit = summary.romanceLabel ? `; romance — she ${summary.romanceLabel.replace("you", "them")}` : "";
-      return `- ${name}: friendship — ${summary.friendLabel}${romanceBit}`;
-    }).join("\n");
+    const peopleNotes = bondsNotesFor(batch.map((entry) => entry.userId));
     const results = await analyst.interpretReactions({
       groups: [...groups.values()],
       contextLines: recentHumanLines(channelId, 6),
@@ -576,6 +567,63 @@ function recentChannelLines(channelId, limit = 8) {
   return rows.map((row) => row.is_bot ? `${row.author_name} [bot]: ${row.content}` : `${row.author_name}: ${row.content}`).join("\n");
 }
 
+// One line per person describing her bond with them — the compact form
+// judgment prompts understand ("Ren: friendship — close friends; romance — …").
+function bondsNotesFor(userIds) {
+  return [...new Set(userIds)].filter(Boolean).map((userId) => {
+    const row = memoryDb.prepare(
+      "SELECT affinity, romance, last_interacted FROM relationships WHERE user_id = ?",
+    ).get(userId);
+    const name = displayNameFor(userId);
+    if (!row) return `- ${name}: no bond yet`;
+    const summary = relationshipSummary(row);
+    const romanceBit = summary.romanceLabel ? `; romance — she ${summary.romanceLabel.replace("you", "them")}` : "";
+    return `- ${name}: friendship — ${summary.friendLabel}${romanceBit}`;
+  }).join("\n");
+}
+
+// The people behind a channel's recent human chatter, most recent first —
+// whose bonds to include in a judgment prompt.
+function recentSpeakers(channelId, limit = 5) {
+  return memoryDb.prepare(`
+    SELECT author_id FROM (
+      SELECT author_id, MAX(id) AS last_id FROM messages
+      WHERE channel_id = ? AND is_bot = 0 GROUP BY author_id
+      ORDER BY last_id DESC LIMIT ?
+    )
+  `).all(channelId, limit).map((row) => row.author_id);
+}
+
+// --- AI chime-in judgment -----------------------------------------------------
+// Both spontaneous paths used to fire on chance alone: the in-flow one asked
+// the full reply model with almost no context (one quoted message), the idle
+// one always sent a rotating opener. Now, when the roll hits, the judgment
+// module first decides whether the moment is worth joining and writes the
+// line — seeing the recent rendered conversation, her bonds with the
+// speakers, and the time of day. A failed or budgetless judgment falls back
+// to the old behavior: she is never quieter because the layer is down, only
+// smarter when it is up.
+
+// Cheap anti-repeat: if the judgment's line already appears nearly verbatim
+// in the recent channel lines, she stays silent rather than echo herself.
+function isRepeatOfRecent(line, lines) {
+  const head = String(line || "").slice(0, 40).trim().toLowerCase();
+  if (!head) return true;
+  return String(lines || "").toLowerCase().includes(head);
+}
+
+async function judgeChimeInFor(channel, occasion) {
+  const lines = recentChannelLines(channel.id, 8);
+  const verdict = await analyst.judgeChimeIn({
+    channelLabel: channel.name || "chat",
+    lines,
+    peopleNotes: bondsNotesFor(recentSpeakers(channel.id)),
+    worldNote: renderAliveness(new Date(), lastSpokeAtRef.value),
+    occasion,
+  });
+  return { verdict, lines };
+}
+
 // Composed per message: a rotating opener angle (so openings stop feeling
 // samey) plus the channel's recent human conversation as hook-in context.
 function spontaneousPromptFor(channelId) {
@@ -590,6 +638,32 @@ function spontaneousPromptFor(channelId) {
 async function sendSpontaneousMessage(channel) {
   const lastReply = spontaneousReplies.get(channel.id) || 0;
   if (Date.now() - lastReply < config.spontaneousCooldownMs) return;
+
+  // Claim the slot up front: while the judgment is in flight (or after she
+  // decides to stay quiet) the timer must not re-roll her.
+  spontaneousReplies.set(channel.id, Date.now());
+
+  if (config.analysisEnabled) {
+    try {
+      const { verdict, lines } = await judgeChimeInFor(
+        channel, "the channel has gone quiet and she is considering starting something");
+      if (verdict) {
+        if (!verdict.speak || !verdict.line || isRepeatOfRecent(verdict.line, lines)) return;
+        await deliverReply({ channel, react: async () => {} }, verdict.line, {
+          lastSpokeAtRef,
+          spontaneous: true,
+          onSent: (sent) => trackSentMessage(sent, verdict.line),
+        });
+        rememberBotMessage(channel.id, verdict.line);
+        rememberOwnMessage({ channel, guild: channel.guild }, verdict.line);
+        return;
+      }
+      // No verdict (budget spent, API down, bad JSON): fall through to the
+      // classic opener below — never quieter than before.
+    } catch (error) {
+      console.warn("Chime-in judgment failed:", error.message);
+    }
+  }
 
   const prompt = spontaneousPromptFor(channel.id);
   let answer = await askAI({
@@ -608,7 +682,6 @@ async function sendSpontaneousMessage(channel) {
     spontaneous: true,
     onSent: (sent) => trackSentMessage(sent, answer),
   });
-  spontaneousReplies.set(channel.id, Date.now());
   rememberBotMessage(channel.id, answer);
   rememberOwnMessage({ channel, guild: channel.guild }, answer);
 }
@@ -1153,6 +1226,31 @@ client.on(Events.MessageCreate, async (message) => {
     if (!canReply || message.content.length < 8 || Math.random() >= config.spontaneousChance) return;
     if (isGameCommand(message.content) || isLearnedGameChannel(message.channel.id)) return;
 
+    // The roll fired: claim the slot so nothing re-rolls while the judgment
+    // is in flight, and a "stay quiet" verdict buys real quiet.
+    spontaneousReplies.set(message.channel.id, Date.now());
+
+    if (config.analysisEnabled) {
+      try {
+        const { verdict, lines } = await judgeChimeInFor(
+          message.channel, "someone just said something she overheard");
+        if (verdict) {
+          if (verdict.speak && verdict.line && !isRepeatOfRecent(verdict.line, lines)) {
+            await deliverReply(message, verdict.line, { lastSpokeAtRef, onSent: (sent) => trackSentMessage(sent, verdict.line) });
+            updateAffinity(message.author.id);
+            markEngaged(message.channel.id, message.author.id);
+            rememberBotMessage(message.channel.id, verdict.line);
+            rememberOwnMessage(message, verdict.line);
+          }
+          return;
+        }
+        // No verdict (budget spent, API down, bad JSON): fall through to the
+        // classic NO_REPLY path below — never quieter than before.
+      } catch (error) {
+        console.warn("Chime-in judgment failed:", error.message);
+      }
+    }
+
     await message.channel.sendTyping();
     try {
       // The roll already fired, so one lazy fetch is fine: restore the
@@ -1180,7 +1278,6 @@ client.on(Events.MessageCreate, async (message) => {
         await deliverReply(message, answer, { lastSpokeAtRef, onSent: (sent) => trackSentMessage(sent, answer) });
         updateAffinity(message.author.id);
         markEngaged(message.channel.id, message.author.id);
-        spontaneousReplies.set(message.channel.id, Date.now());
         rememberBotMessage(message.channel.id, answer);
         rememberOwnMessage(message, answer);
       }
