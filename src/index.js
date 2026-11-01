@@ -83,6 +83,10 @@ function isLearnedGameChannel(channelId) {
   return facts.some((fact) => fact.includes("bot-game channel"));
 }
 
+function isReplyIdentityQuestion(prompt) {
+  return /^(?:who(?:'s|s|\s+is|\s+are)?\s+(?:this|that|now)|who(?:\s+am)?\s+i(?:'m)?\s+replying\s+to|which\s+(?:message|person|bot)\s+(?:am\s+i\s+)?replying\s+to)\s*[?!.]?$|^now\s+who\s*[?!.]?$/.test(prompt.toLowerCase());
+}
+
 // What message did they hit Discord's "reply" on? Without this, "his user"
 // in a reply to someone else's message is an unresolvable pronoun. Returns
 // null for normal messages, so the common path stays free of extra work.
@@ -364,6 +368,16 @@ client.on(Events.MessageCreate, async (message) => {
 
   await message.channel.sendTyping();
   try {
+    if (replyTarget && isReplyIdentityQuestion(prompt)) {
+      answer = replyTarget.isSelf
+        ? "You're replying to me, Teacher-san."
+        : `You're replying to ${replyTarget.authorName}.`;
+      await deliverReply(message, answer, { lastSpokeAtRef });
+      updateAffinity(message.author.id);
+      rememberBotMessage(message.channel.id, answer);
+      rememberOwnMessage(message, answer);
+      return;
+    }
     let answer;
     let delivered = false;
     const rememberedFact = !command ? parseRememberCommand(prompt) : null;
