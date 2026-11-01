@@ -134,6 +134,62 @@ test("dollar signs in memories never corrupt the memory block", () => {
   rmSync(directory, { recursive: true, force: true });
 });
 
+test("other bots appear in the roster and recent conversation, marked as bots", () => {
+  // The "who is dis?" failure: TEST. posted a help dump, but bot messages
+  // were never logged, so she had no way to know who "dis" was.
+  const directory = mkdtempSync(join(tmpdir(), "apitest-bots-"));
+  const db = createMemoryDb(join(directory, "memory.db"));
+  writeFileSync(join(directory, "personality.txt"), "You are a playful Discord companion.");
+  logMessage(db, {
+    channelId: "channel-1", authorId: "bot-test", authorName: "TEST.", username: "TEST.",
+    content: "Commands: bac, bal, bj, daily, help, hl, joinvc", createdAt: Date.now() - 30_000, guildId: "guild-1",
+    isBot: true,
+  });
+  logMessage(db, {
+    channelId: "channel-1", authorId: "bot-owo", authorName: "OwO", username: "OwO",
+    content: "sprite vodka, you currently have 135,000 cowoncy!", createdAt: Date.now() - 20_000, guildId: "guild-1",
+    isBot: true,
+  });
+  logMessage(db, {
+    channelId: "channel-1", authorId: "human-1", authorName: "sprite vodka", username: "sprite_vodka",
+    content: "who is dis", createdAt: Date.now() - 10_000, guildId: "guild-1",
+  });
+
+  const context = buildContext(db, {
+    message: { channelId: "channel-1", authorId: "human-1", authorName: "sprite vodka", content: "who is dis", guildId: "guild-1" },
+    personalityPath: join(directory, "personality.txt"),
+    botId: "bot-1",
+  });
+
+  // Roster: bots listed with a [a bot] marker, humans unmarked.
+  assert.match(context.memoryBlock, /TEST\.[^\n]*\[a bot\]/);
+  assert.match(context.memoryBlock, /OwO[^\n]*\[a bot\]/);
+  assert.doesNotMatch(context.memoryBlock, /sprite vodka[^\n]*\[a bot\]/);
+  // Recent conversation carries the bot output so "who is dis" is answerable.
+  assert.ok(context.memoryBlock.includes("cowoncy"), "bot messages must surface in recent conversation");
+  rmSync(directory, { recursive: true, force: true });
+});
+
+test("active conversation is stated in the speaker block", () => {
+  const directory = mkdtempSync(join(tmpdir(), "apitest-active-"));
+  const db = createMemoryDb(join(directory, "memory.db"));
+  writeFileSync(join(directory, "personality.txt"), "You are a playful Discord companion.");
+  const context = buildContext(db, {
+    message: { channelId: "channel-1", authorId: "u1", authorName: "Finn", content: "yeah exactly", guildId: "guild-1", activeConvo: true },
+    personalityPath: join(directory, "personality.txt"),
+    botId: "bot-1",
+  });
+  assert.match(context.memoryBlock, /middle of an ongoing conversation/);
+
+  const plain = buildContext(db, {
+    message: { channelId: "channel-1", authorId: "u1", authorName: "Finn", content: "yeah exactly", guildId: "guild-1" },
+    personalityPath: join(directory, "personality.txt"),
+    botId: "bot-1",
+  });
+  assert.doesNotMatch(plain.memoryBlock, /ongoing conversation/);
+  rmSync(directory, { recursive: true, force: true });
+});
+
 test("buildContext caps large recent and relevant memory within a configured budget", () => {
   const directory = mkdtempSync(join(tmpdir(), "apitest-large-context-"));
   const db = createMemoryDb(join(directory, "memory.db"));

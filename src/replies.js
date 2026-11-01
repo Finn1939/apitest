@@ -34,3 +34,41 @@ export function replyAuthorsAgree(authorIds) {
   const resolved = [...new Set(authorIds.filter(Boolean))];
   return resolved.length <= 1;
 }
+
+// Resolving a reply target can cost a Discord REST call, so only do it when
+// the answer could actually change what the bot does. Game channels are full
+// of bot replies that must never trigger API traffic.
+export function shouldResolveReplyTarget({ hasReference, mentioned, addressed, engaged, isCommand }) {
+  if (!hasReference) return false;
+  if (isCommand) return false;
+  return Boolean(mentioned || addressed || engaged);
+}
+
+// Deterministic, in-character answers for "who am I replying to?" questions.
+// The model used to guess from surrounding messages; these answers are built
+// only from the verified reply target, so they can never name the wrong bot.
+export function pickIdentityAnswer(replyTarget, selfName = "me") {
+  if (!replyTarget) {
+    const variants = [
+      "I can't see the message you replied to anymore, nya... it might have been deleted.",
+      "Hmm, I can't verify that reply anymore, sorry~",
+    ];
+    return variants[Math.floor(Math.random() * variants.length)];
+  }
+  if (replyTarget.isSelf) {
+    const variants = [
+      `That's me, ${selfName}~ 🐾`,
+      `That one's mine, nya! You're replying to ${selfName}.`,
+      `You're replying to me, ${selfName}, ehe~`,
+    ];
+    return variants[Math.floor(Math.random() * variants.length)];
+  }
+  const name = replyTarget.authorName || "someone";
+  const withContent = replyTarget.content ? ` — the one that said "${replyTarget.content.slice(0, 80)}"` : "";
+  const variants = [
+    `You're replying to ${name}${withContent}, nya~`,
+    `That's ${name}${withContent}!`,
+    `${name}, nya~ that's who you replied to${withContent}.`,
+  ];
+  return variants[Math.floor(Math.random() * variants.length)];
+}

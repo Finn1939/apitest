@@ -29,6 +29,10 @@ export const config = {
   timezone: process.env.TIMEZONE || "Asia/Manila",
   spontaneousChance: Number(process.env.SPONTANEOUS_CHANCE || 0.04),
   spontaneousCooldownMs: Number(process.env.SPONTANEOUS_COOLDOWN_MINUTES || 15) * 60_000,
+  // How long after she replies to someone their follow-up messages are still
+  // guaranteed a reply (no mention or reply needed). Keeps a conversation
+  // flowing like a real person would.
+  convoEngageMs: Math.max(1, Number(process.env.CONVO_ENGAGE_MINUTES || 10)) * 60_000,
   // Optional timezone label shown with the clock (e.g. "PHT" for Asia/Manila).
   timezoneLabel: process.env.TIMEZONE_LABEL || "PHT",
   memoryContextTokens: Math.max(4000, Number(process.env.MEMORY_CONTEXT_TOKENS || 32000)),

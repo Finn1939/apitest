@@ -72,8 +72,8 @@ export function truncateTokens(text, maxTokens) {
 
 export function logMessage(db, message) {
   return db.prepare(`
-    INSERT INTO messages(channel_id, author_id, author_name, username, content, created_at, guild_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO messages(channel_id, author_id, author_name, username, content, created_at, guild_id, is_bot)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     message.channelId,
     message.authorId,
@@ -82,6 +82,7 @@ export function logMessage(db, message) {
     message.content,
     message.createdAt || Date.now(),
     message.guildId || "",
+    message.isBot ? 1 : 0,
   ).lastInsertRowid;
 }
 
@@ -103,6 +104,9 @@ export function buildContext(db, { message, embedVector, personalityPath = "pers
   const speakerLines = [
     `${speakerName}${speakerHandle ? ` (@${speakerHandle})` : ""} is talking to you right now.`,
   ];
+  if (message.activeConvo) {
+    speakerLines.push("You are in the middle of an ongoing conversation with them right now; they are talking to you even without mentioning you.");
+  }
   if (relationship && (relationship.affinity > 0 || relationship.last_interacted > 0)) {
     speakerLines.push(`To you they feel like ${affinityTier(relationship.affinity)}.`);
     if (relationship.last_interacted > 0) {
@@ -129,22 +133,24 @@ export function buildContext(db, { message, embedVector, personalityPath = "pers
   }
   const speakerText = speakerLines.join(" ");
 
-  // Roster of people the bot has actually seen in this server, with usernames,
-  // so "what's his username?" style questions can be answered.
+  // Roster of people (and bots) the bot has actually seen in this server, with
+  // usernames, so "what's his username?" and "who is dis?" style questions can
+  // be answered. Humans come first; bots are labelled so she never mistakes a
+  // game bot for a person.
   const rosterRows = db.prepare(`
-    SELECT author_id, author_name,
+    SELECT author_id, author_name, is_bot,
            COALESCE(NULLIF(username, ''), NULLIF(author_name, ''), author_id) AS handle,
            MAX(created_at) AS last_active
     FROM messages
     WHERE created_at >= ? AND author_id != ? AND (guild_id = ? OR guild_id = '')
     GROUP BY author_id
-    ORDER BY last_active DESC
+    ORDER BY is_bot ASC, last_active DESC
     LIMIT 15
   `).all(Date.now() - 30 * 86_400_000, botId || "", message.guildId || "");
   const rosterText = rosterRows.length
     ? rosterRows.map((row) => {
         const hasHandle = row.handle !== row.author_name;
-        return `- ${row.author_name}${hasHandle ? ` (@${row.handle})` : ""} — last active ${timeAgo(row.last_active)}`;
+        return `- ${row.author_name}${hasHandle ? ` (@${row.handle})` : ""}${row.is_bot ? " [a bot]" : ""} — last active ${timeAgo(row.last_active)}`;
       }).join("\n")
     : "";
 

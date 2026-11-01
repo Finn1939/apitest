@@ -51,6 +51,7 @@ const db = createMemoryDb(dbPath);
 const columns = db.prepare("PRAGMA table_info(messages)").all().map((column) => column.name);
 if (!columns.includes("guild_id")) throw new Error("migration failed: guild_id missing");
 if (!columns.includes("username")) throw new Error("migration failed: username missing");
+if (!columns.includes("is_bot")) throw new Error("migration failed: is_bot missing");
 const legacyTable = db.prepare("SELECT name FROM sqlite_master WHERE name = 'vec_messages'").get();
 if (legacyTable) throw new Error("migration failed: legacy vec_messages still present");
 const vecCount = db.prepare("SELECT COUNT(*) AS c FROM vec_messages_v").get().c;
@@ -58,7 +59,7 @@ if (vecCount !== 2) throw new Error(`migration failed: expected 2 migrated vecto
 const rekeyed = db.prepare("SELECT subject FROM facts WHERE fact LIKE '%PC%'").get();
 if (rekeyed?.subject !== "user:111") throw new Error(`migration failed: fact re-key produced ${rekeyed?.subject}`);
 const version = db.pragma("user_version", { simple: true });
-if (version !== 4) throw new Error(`migration failed: user_version = ${version}`);
+if (version !== 5) throw new Error(`migration failed: user_version = ${version}`);
 if (!db.prepare("PRAGMA table_info(relationships)").all().some((c) => c.name === "last_interacted")) {
   throw new Error("migration failed: relationships.last_interacted missing");
 }

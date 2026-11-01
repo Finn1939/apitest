@@ -26,7 +26,8 @@ export function createMemoryDb(filePath) {
       created_at INTEGER NOT NULL,
       importance REAL NOT NULL DEFAULT 0.5,
       summarized INTEGER NOT NULL DEFAULT 0,
-      guild_id TEXT NOT NULL DEFAULT ''
+      guild_id TEXT NOT NULL DEFAULT '',
+      is_bot INTEGER NOT NULL DEFAULT 0
     );
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_messages_v USING vec0(
       message_id INTEGER PRIMARY KEY,
@@ -135,6 +136,16 @@ export function createMemoryDb(filePath) {
       db.exec("ALTER TABLE messages ADD COLUMN username TEXT NOT NULL DEFAULT ''");
     }
     db.pragma("user_version = 4");
+  }
+  // v5: mark bot-authored messages so other bots (game bots, helpers) can be
+  // shown in recent conversation and the roster without counting them as
+  // human activity for spontaneous-channel selection.
+  if (db.pragma("user_version", { simple: true }) < 5) {
+    const msgColumns = db.prepare("PRAGMA table_info(messages)").all();
+    if (!msgColumns.some((column) => column.name === "is_bot")) {
+      db.exec("ALTER TABLE messages ADD COLUMN is_bot INTEGER NOT NULL DEFAULT 0");
+    }
+    db.pragma("user_version = 5");
   }
   return db;
 }

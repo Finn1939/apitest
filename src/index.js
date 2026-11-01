@@ -18,7 +18,7 @@ import { createJobs, embedText } from "./jobs.js";
 import { streamReply } from "./llm.js";
 import { deliverReply, deliverStreamedReply, renderAliveness } from "./aliveness.js";
 import { renderDiscordMentions } from "./render.js";
-import { isAddressedToBot, isReplyIdentityQuestion, replyAuthorsAgree } from "./replies.js";
+import { isAddressedToBot, isReplyIdentityQuestion, pickIdentityAnswer, shouldResolveReplyTarget } from "./replies.js";
 
 validateConfig();
 
@@ -47,6 +47,11 @@ const lastBotMessageAtByChannel = new Map();
 const spontaneousReplies = new Map();
 const botActivityByChannel = new Map();
 const botCommandCountByChannel = new Map();
+// channelId -> Map<userId, expiresAt>: after she replies to someone, that
+// person's follow-up messages in the same channel are guaranteed a reply for
+// a while, even without a mention or reply. This is how she keeps a
+// conversation going like a person would.
+const engagedConversations = new Map();
 const memoryDb = createMemoryDb(config.dbPath);
 const jobs = createJobs(memoryDb);
 let pendingByChannel = new Map();
@@ -72,6 +77,32 @@ function randomDelay(minMinutes, maxMinutes) {
   return (minMinutes + Math.random() * (maxMinutes - minMinutes)) * 60_000;
 }
 
+function markEngaged(channelId, userId) {
+  if (!userId) return;
+  let channel = engagedConversations.get(channelId);
+  if (!channel) {
+    channel = new Map();
+    engagedConversations.set(channelId, channel);
+  }
+  channel.set(userId, Date.now() + config.convoEngageMs);
+}
+
+// Active engagement check; renews the window so a flowing conversation never
+// expires mid-chat. Returns false once the user goes quiet past the window.
+function isEngaged(channelId, userId) {
+  const channel = engagedConversations.get(channelId);
+  if (!channel) return false;
+  const expiresAt = channel.get(userId);
+  if (!expiresAt) return false;
+  if (Date.now() > expiresAt) {
+    channel.delete(userId);
+    if (!channel.size) engagedConversations.delete(channelId);
+    return false;
+  }
+  channel.set(userId, Date.now() + config.convoEngageMs);
+  return true;
+}
+
 // Short bot-game commands (Karuta etc.) that should never count as conversation.
 const GAME_COMMAND_RE = /^(?:k(?:d|l|g|c|u|i|q|t|v|w|m|a)?|dk|grab|drop|burn|daily|vote|inv(?:entory)?|collection|wishlist|worker|observe)$/;
 
@@ -91,31 +122,19 @@ function isLearnedGameChannel(channelId) {
 async function resolveReplyTarget(message) {
   const referenceId = message.reference?.messageId;
   if (!referenceId) return null;
-  const cached = message.channel?.messages?.cache?.get(referenceId) || null;
-  let fetchedReference = null;
-  let channelFetch = null;
+  // Cache first (free). Only hit the REST API when the cache missed, and only
+  // once: fetchReference() already resolves the referenced message; fetching
+  // the same id again via the channel adds a second identical call.
+  let ref = message.channel?.messages?.cache?.get(referenceId) || null;
   try {
-    fetchedReference = await message.fetchReference();
+    if (!ref) ref = await message.fetchReference();
   } catch {
-    fetchedReference = null;
+    ref = null; // the referenced message may be deleted or too old to fetch
   }
-  try {
-    if (message.channel?.messages?.fetch) {
-      channelFetch = await message.channel.messages.fetch(referenceId);
-    }
-  } catch {
-    channelFetch = null;
-  }
-
-  const references = [cached, fetchedReference, channelFetch].filter(Boolean);
-  const authorIds = references.filter((ref) => ref.author?.id).map((ref) => ref.author.id);
-  if (!replyAuthorsAgree(authorIds)) {
-    console.warn(`Reply target sources disagree for message ${message.id}; refusing to guess.`);
-    return null;
-  }
-
-  const ref = fetchedReference || channelFetch || cached;
   if (ref?.author) {
+    // mentions.repliedUser comes from the gateway event itself, so it is an
+    // independent source: if it disagrees with the fetched author, refuse to
+    // guess instead of naming the wrong person.
     const repliedUser = message.mentions?.repliedUser;
     if (repliedUser && repliedUser.id !== ref.author.id) {
       console.warn(`Reply author metadata disagrees with the message reference for message ${message.id}; refusing to guess.`);
@@ -147,12 +166,12 @@ async function resolveReplyTarget(message) {
 }
 
 // Real human conversation per channel in a time window: human messages from
-// memory.db (bot messages are never logged there), minus game commands.
+// memory.db (bot messages are never counted), minus game commands.
 function realConversationCounts(sinceMs) {
   const rows = memoryDb.prepare(`
     SELECT channel_id, content FROM messages
-    WHERE created_at >= ? AND author_id != ?
-  `).all(sinceMs, client.user.id);
+    WHERE created_at >= ? AND is_bot = 0
+  `).all(sinceMs);
   const counts = new Map();
   for (const row of rows) {
     if (isGameCommand(row.content)) continue;
@@ -192,6 +211,7 @@ function rememberOwnMessage(messageLike, answer) {
     content: answer,
     createdAt: Date.now(),
     guildId: messageLike.guild?.id || "",
+    isBot: true,
   });
   jobs.enqueueEmbedding(loggedId, answer);
 }
@@ -241,6 +261,9 @@ function scheduleSpontaneousMessages() {
 client.once(Events.ClientReady, (readyClient) => {
   console.log(`Logged in as ${readyClient.user.tag}`);
   console.log(`Prefix: ${config.prefix} | Model: ${config.aiModel}`);
+  // Older databases logged her own messages before the is_bot flag existed;
+  // mark them so they never count as human activity.
+  memoryDb.prepare("UPDATE messages SET is_bot = 1 WHERE author_id = ?").run(readyClient.user.id);
   readyClient.application.commands.set([
     { name: "memory_stats", description: "Show persistent memory statistics" },
     { name: "memories", description: "Show remembered facts for a user", options: [{ name: "user", description: "Member to inspect", type: 6, required: true }] },
@@ -292,6 +315,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) {
     botActivityByChannel.set(message.channel.id, (botActivityByChannel.get(message.channel.id) || 0) + 1);
+    // Log other bots' messages (truncated, never in learned game channels) so
+    // she knows who TEST./OwO/Karuta are when someone asks "who is dis?".
+    // No embeddings: game-bot spam would burn CPU for zero recall value.
+    if (!isLearnedGameChannel(message.channel.id) && message.content) {
+      logMessage(memoryDb, {
+        channelId: message.channel.id,
+        authorId: message.author.id,
+        authorName: message.author.displayName || message.author.username,
+        username: message.author.username,
+        content: message.content.replace(/\s+/g, " ").trim().slice(0, 200),
+        createdAt: message.createdTimestamp,
+        guildId: message.guild?.id || "",
+        isBot: true,
+      });
+    }
     return;
   }
 
@@ -338,13 +376,30 @@ client.on(Events.MessageCreate, async (message) => {
   const displayName = message.member?.displayName || message.author.username;
   rememberUserMessage(message.channel.id, displayName, renderedContent);
 
-  const replyTarget = await resolveReplyTarget(message);
+  // Decide what this message is BEFORE any async work, so stray replies in
+  // game channels never trigger Discord API calls just to resolve targets.
   const mentioned = message.mentions.has(client.user);
-  const addressed = mentioned || isAddressedToBot(renderedContent, {
+  const inDm = message.channel.isDMBased?.() === true;
+  const heuristicAddressed = isAddressedToBot(renderedContent, {
     botUsername: client.user.username,
     recentBotMessage: Date.now() - (lastBotMessageAtByChannel.get(message.channel.id) || 0) <= 5 * 60_000,
   });
+  // In a DM, every message is talking to her.
+  const engaged = !inDm && !karutaCommand
+    ? isEngaged(message.channel.id, message.author.id)
+    : inDm;
   const command = parseCommand(message.content, config.prefix);
+  const needsReplyTarget = shouldResolveReplyTarget({
+    hasReference: Boolean(message.reference?.messageId),
+    mentioned,
+    addressed: heuristicAddressed,
+    engaged,
+    isCommand: command !== null,
+  });
+  const replyTarget = needsReplyTarget ? await resolveReplyTarget(message) : null;
+  // A reply aimed at her (even with the ping toggled off) is always for her.
+  const replyingToMe = replyTarget?.isSelf === true;
+  const addressed = mentioned || replyingToMe || engaged || inDm || heuristicAddressed;
   if (!addressed && command === null) {
     const lastReply = spontaneousReplies.get(message.channel.id) || 0;
     const canReply = Date.now() - lastReply >= config.spontaneousCooldownMs;
@@ -353,8 +408,14 @@ client.on(Events.MessageCreate, async (message) => {
 
     await message.channel.sendTyping();
     try {
-      const replyNote = replyTarget
-        ? ` They sent it as a Discord reply to ${replyTarget.isSelf ? "your earlier message" : `${replyTarget.authorName}'s message${replyTarget.content ? ` ("${replyTarget.content}")` : ""}`}.`
+      // The roll already fired, so one lazy fetch is fine: restore the
+      // reply-context note for chime-ins without paying for it on every roll.
+      let noteTarget = replyTarget;
+      if (!noteTarget && message.reference?.messageId) {
+        noteTarget = await resolveReplyTarget(message);
+      }
+      const replyNote = noteTarget
+        ? ` They sent it as a Discord reply to ${noteTarget.isSelf ? "your earlier message" : `${noteTarget.authorName}'s message${noteTarget.content ? ` ("${noteTarget.content}")` : ""}`}.`
         : "";
       const answer = await askAI({
         prompt: `Someone in Discord said: "${renderedContent}".${replyNote} React naturally, only if there is a reason to join in. If you would add nothing useful, answer exactly: NO_REPLY.`,
@@ -364,6 +425,7 @@ client.on(Events.MessageCreate, async (message) => {
       if (!/^no[_\s-]?reply$/i.test(answer.trim())) {
         await deliverReply(message, answer, { lastSpokeAtRef });
         updateAffinity(message.author.id);
+        markEngaged(message.channel.id, message.author.id);
         spontaneousReplies.set(message.channel.id, Date.now());
         rememberBotMessage(message.channel.id, answer);
         rememberOwnMessage(message, answer);
@@ -389,13 +451,13 @@ client.on(Events.MessageCreate, async (message) => {
   try {
     let answer;
     if (isReplyIdentityQuestion(prompt)) {
-      answer = replyTarget
-        ? replyTarget.isSelf
-          ? "You're replying to me, Teacher-san."
-          : `You're replying to ${replyTarget.authorName}.`
-        : "I can't verify the referenced message, nya.";
+      // Deterministic: built only from the verified reply target, so she can
+      // never name the wrong bot. Never hardcode her own name — use the
+      // live username so renaming the bot cannot make her lie.
+      answer = pickIdentityAnswer(replyTarget, client.user.username);
       await deliverReply(message, answer, { lastSpokeAtRef });
       updateAffinity(message.author.id);
+      markEngaged(message.channel.id, message.author.id);
       rememberBotMessage(message.channel.id, answer);
       rememberOwnMessage(message, answer);
       return;
@@ -441,6 +503,7 @@ client.on(Events.MessageCreate, async (message) => {
           authorName: displayName,
           content: prompt,
           guildId: message.guild?.id || "",
+          activeConvo: engaged || replyingToMe,
         },
         embedVector,
         deepRecall,
@@ -471,6 +534,7 @@ client.on(Events.MessageCreate, async (message) => {
     if (!answer) return;
     if (!delivered) await deliverReply(message, answer, { lastSpokeAtRef });
     updateAffinity(message.author.id);
+    markEngaged(message.channel.id, message.author.id);
     rememberBotMessage(message.channel.id, answer);
     rememberOwnMessage(message, answer);
   } catch (error) {
