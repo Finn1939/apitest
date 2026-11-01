@@ -8,3 +8,22 @@ export function isReplyIdentityQuestion(prompt) {
     || /^this\s+one\s*[?!.]?$/.test(normalized)
     || /^that\s+one\s*[?!.]?$/.test(normalized);
 }
+
+export function isAddressedToBot(content, options = {}) {
+  const text = String(content || "").toLowerCase();
+  const botNames = [options.botUsername, "teacher-san", "teachersan", "teacher san"]
+    .filter(Boolean)
+    .map((name) => String(name).toLowerCase());
+
+  if (botNames.some((name) => text.includes(name))) return true;
+  if (isReplyIdentityQuestion(content) || /^(?:and\s+)?(?:this|that)\s+one\b/.test(text.trim())) return Boolean(options.recentBotMessage);
+
+  const directSecondPerson = /\b(?:you|your|you're|you've)\b/.test(text);
+  if (!directSecondPerson) {
+    const directGreeting = /^(?:hey|hi|hello|hiya|yo|thanks?|please)[,! ]/i.test(text.trim());
+    return Boolean(options.recentBotMessage && directGreeting);
+  }
+
+  const clearlyAddressesAnotherUser = /<@!?\d+>|@[\w-]+/.test(content || "");
+  return !clearlyAddressesAnotherUser && (/\?\s*$/.test(text.trim()) || /^(?:please|can you|could you|would you|will you|do you|are you)\b/.test(text.trim()));
+}

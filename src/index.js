@@ -18,7 +18,7 @@ import { createJobs, embedText } from "./jobs.js";
 import { streamReply } from "./llm.js";
 import { deliverReply, deliverStreamedReply, renderAliveness } from "./aliveness.js";
 import { renderDiscordMentions } from "./render.js";
-import { isReplyIdentityQuestion } from "./replies.js";
+import { isAddressedToBot, isReplyIdentityQuestion } from "./replies.js";
 
 validateConfig();
 
@@ -43,6 +43,7 @@ const client = new Client({
 const storedMemory = loadMemory();
 const conversations = storedMemory.conversations;
 const channelFacts = storedMemory.facts;
+const lastBotMessageAtByChannel = new Map();
 const spontaneousReplies = new Map();
 const botActivityByChannel = new Map();
 const botCommandCountByChannel = new Map();
@@ -158,6 +159,7 @@ function activeConversationChannels() {
 }
 
 function rememberBotMessage(channelId, answer) {
+  lastBotMessageAtByChannel.set(channelId, Date.now());
   const history = conversations.get(channelId) || [];
   conversations.set(channelId, addHistory(history, { role: "assistant", content: answer }));
   persistMemory();
@@ -322,8 +324,12 @@ client.on(Events.MessageCreate, async (message) => {
 
   const replyTarget = await resolveReplyTarget(message);
   const mentioned = message.mentions.has(client.user);
+  const addressed = mentioned || isAddressedToBot(renderedContent, {
+    botUsername: client.user.username,
+    recentBotMessage: Date.now() - (lastBotMessageAtByChannel.get(message.channel.id) || 0) <= 5 * 60_000,
+  });
   const command = parseCommand(message.content, config.prefix);
-  if (!mentioned && command === null) {
+  if (!addressed && command === null) {
     const lastReply = spontaneousReplies.get(message.channel.id) || 0;
     const canReply = Date.now() - lastReply >= config.spontaneousCooldownMs;
     if (!canReply || message.content.length < 8 || Math.random() >= config.spontaneousChance) return;
