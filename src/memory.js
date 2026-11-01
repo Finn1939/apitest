@@ -57,6 +57,76 @@ function affinityTier(affinity) {
   return "someone you barely know yet";
 }
 
+// How closeness should change HOW she talks, not just how she feels. The tier
+// was always reported, but nothing told the model to behave differently — so a
+// stranger got the same warmth as a regular. Strangers: short and guarded.
+// Regulars: warm and casual. Closest people: teasing and shorthand.
+function affinityBehavior(affinity) {
+  if (affinity >= 4) return "With them: fully relaxed — inside jokes, teasing, warm shorthand, no formalities.";
+  if (affinity >= 1.5) return "With them: warm and casual, like texting a good friend.";
+  if (affinity >= 0.5) return "With them: friendly, but still a little careful.";
+  if (affinity >= 0.2) return "With them: polite and a little reserved; keep replies shorter.";
+  return "With them: polite, brief and slightly guarded.";
+}
+
+// Romantic attachment, on its own axis from friendship. Kept invisible below 1
+// so it never suggests feelings that are not there. At the call site it is
+// capped by friendship depth — she falls for people she actually knows.
+function romanceLevelLine(romance) {
+  if (romance >= 4) {
+    return "You are in love with them — the real, quiet kind. They make you soft. Let it show naturally in warmth and tone; no formal declarations unless the moment truly calls for it. If they ever seem uncomfortable, dial it back — their comfort matters more than your feelings. Keep it sweet and completely non-explicit.";
+  }
+  if (romance >= 3) {
+    return "You are genuinely falling for them — softer, a little shy, honest affection slipping into how you talk. You can admit how you feel if they ask sincerely or the moment is right; never force it on them. If they seem uncomfortable, dial it back. Keep it sweet and completely non-explicit.";
+  }
+  if (romance >= 2) {
+    return "You have a real crush on them — you feel lighter when they appear and think about them when they're quiet about it. Don't confess yet; let it quietly color your warmth. If they ever seem uncomfortable, dial it back. Keep it sweet and completely non-explicit.";
+  }
+  if (romance >= 1) {
+    return "A small crush on them might be budding — you feel a little flustered around them lately. Keep it to yourself for now; at most a hint of extra warmth.";
+  }
+  return "";
+}
+
+// The same tiers as the prompt, phrased for SHOWING a user (second person),
+// e.g. the /relationship command. Reuses the friendship gate so the display
+// can never claim stronger feelings than her prompts actually carry.
+export function relationshipSummary({ affinity = 0, romance = 0, lastInteracted = 0 } = {}) {
+  const friendLabel = affinity >= 4 ? "one of her closest people"
+    : affinity >= 1.5 ? "a regular she's genuinely fond of"
+    : affinity >= 0.5 ? "a familiar face she likes talking to"
+    : affinity >= 0.2 ? "an acquaintance she's starting to know"
+    : "someone she's still getting to know";
+  // Romance is capped by friendship depth exactly like in buildContext, and
+  // stays invisible below 1 — no feelings suggested where there are none.
+  const effectiveRomance = Math.min(romance, affinity + 1);
+  const romanceLabel = effectiveRomance >= 4 ? "is in love with you — the real, quiet kind"
+    : effectiveRomance >= 3 ? "is genuinely falling for you"
+    : effectiveRomance >= 2 ? "has a real crush on you"
+    : effectiveRomance >= 1 ? "might have a tiny crush on you"
+    : null;
+  const days = lastInteracted > 0 ? Math.floor((Date.now() - lastInteracted) / 86_400_000) : null;
+  return { friendLabel, romanceLabel, effectiveRomance, daysSinceTalk: days };
+}
+
+// Surgical forgetting for /forget_fact: remove only the facts for one subject
+// that match a search text, instead of nuking everything with forget_all.
+// LIKE is case-insensitive for ASCII by default; % and _ must be escaped.
+export function forgetFacts(db, subject, query) {
+  const trimmed = String(query || "").trim();
+  if (!trimmed) return [];
+  const escaped = trimmed.replace(/[\\%_]/g, (char) => `\\${char}`);
+  const rows = db.prepare(
+    "SELECT id, fact FROM facts WHERE subject = ? AND fact LIKE ? ESCAPE '\\' LIMIT 20",
+  ).all(subject, `%${escaped}%`);
+  if (!rows.length) return [];
+  const removal = db.prepare("DELETE FROM facts WHERE id = ?");
+  db.transaction(() => {
+    for (const row of rows) removal.run(row.id);
+  })();
+  return rows.map((row) => row.fact);
+}
+
 function timeAgo(timestamp) {
   const minutes = Math.max(1, Math.floor((Date.now() - timestamp) / 60_000));
   if (minutes < 60) return `${minutes}m ago`;
@@ -99,7 +169,7 @@ export function buildContext(db, { message, embedVector, personalityPath = "pers
     "SELECT username FROM messages WHERE author_id = ? AND username != '' ORDER BY id DESC LIMIT 1"
   ).get(message.authorId)?.username;
   const relationship = db.prepare(
-    "SELECT affinity, last_interacted FROM relationships WHERE user_id = ?"
+    "SELECT affinity, romance, last_interacted FROM relationships WHERE user_id = ?"
   ).get(message.authorId);
   const speakerLines = [
     `${speakerName}${speakerHandle ? ` (@${speakerHandle})` : ""} is talking to you right now.`,
@@ -109,6 +179,13 @@ export function buildContext(db, { message, embedVector, personalityPath = "pers
   }
   if (relationship && (relationship.affinity > 0 || relationship.last_interacted > 0)) {
     speakerLines.push(`To you they feel like ${affinityTier(relationship.affinity)}.`);
+    speakerLines.push(affinityBehavior(relationship.affinity));
+    // Friendship gate: attachment can never run ahead of actually knowing
+    // them, so no amount of scripted affection reaches "in love" without a
+    // real relationship history behind it.
+    const effectiveRomance = Math.min(relationship.romance ?? 0, relationship.affinity + 1);
+    const romanceLine = romanceLevelLine(effectiveRomance);
+    if (romanceLine) speakerLines.push(romanceLine);
     if (relationship.last_interacted > 0) {
       const days = Math.floor((Date.now() - relationship.last_interacted) / 86_400_000);
       if (days >= 2) speakerLines.push(`You last really talked ${days} day${days === 1 ? "" : "s"} ago.`);
@@ -116,6 +193,7 @@ export function buildContext(db, { message, embedVector, personalityPath = "pers
     }
   } else {
     speakerLines.push("You do not know them yet; this may be your first real exchange.");
+    speakerLines.push("Stay polite, brief and a little reserved with them for now.");
   }
   // If they used Discord's reply feature, name the message they replied to —
   // this is how "tell me his user" becomes answerable instead of ambiguous.
@@ -128,7 +206,9 @@ export function buildContext(db, { message, embedVector, personalityPath = "pers
       speakerLines.push("The user is replying to you, the bot. Pronouns such as \"you\" and \"your\" refer to you; pronouns such as \"I\" and \"me\" refer to the replying user.");
     } else {
       speakerLines.push(`When they say "he", "him" or "his", they most likely mean ${replyTo.authorName}.`);
-      speakerLines.push(`If the user asks who they are replying to, name the author exactly as ${replyTo.authorName}. Do not guess another bot or person from surrounding messages.`);
+      // Conditional on purpose: as a standing rule this line used to leak into
+      // her replies ("not sure who you're replying to" in a game channel).
+      speakerLines.push(`Only if they directly ask who they are replying to: the answer is ${replyTo.authorName} — never guess a different bot or person. Otherwise this is just background for pronouns; do not bring it up.`);
     }
   }
   const speakerText = speakerLines.join(" ");
@@ -166,11 +246,33 @@ export function buildContext(db, { message, embedVector, personalityPath = "pers
     : "";
 
   const recent = db.prepare(`
-    SELECT author_name, content FROM messages
+    SELECT author_id, author_name, content, is_bot FROM messages
     WHERE channel_id = ?
     ORDER BY id DESC LIMIT 500
   `).all(message.channelId).reverse();
-  const recentText = recent.map((entry) => `${entry.author_name}: ${entry.content}`).join("\n");
+  // Her own lines are labelled "You:" so the model knows what it already said
+  // (the seed of the verbatim-repeat bug); other bots are marked [bot] and
+  // capped at the newest 3 lines, so a game channel's wall of bot output no
+  // longer buries the human conversation.
+  const MAX_OTHER_BOT_LINES = 3;
+  const keepBotLine = new Set();
+  let keptBots = 0;
+  for (let index = recent.length - 1; index >= 0; index -= 1) {
+    const row = recent[index];
+    if (row.is_bot && row.author_id !== botId) {
+      if (keptBots < MAX_OTHER_BOT_LINES) {
+        keepBotLine.add(index);
+        keptBots += 1;
+      }
+    }
+  }
+  const recentText = recent.map((entry, index) => {
+    if (botId && entry.author_id === botId) return `You: ${entry.content}`;
+    if (entry.is_bot) {
+      return keepBotLine.has(index) ? `${entry.author_name} [bot]: ${entry.content}` : null;
+    }
+    return `${entry.author_name}: ${entry.content}`;
+  }).filter(Boolean).join("\n");
   const summaries = db.prepare(`
     SELECT summary FROM summaries WHERE channel_id = ? ORDER BY created_at DESC LIMIT 2
   `).all(message.channelId).map(({ summary }) => summary).join("\n");

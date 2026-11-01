@@ -147,5 +147,14 @@ export function createMemoryDb(filePath) {
     }
     db.pragma("user_version = 5");
   }
+  // v6: romantic attachment grows separately from friendship affinity. Existing
+  // rows start at 0 (no feelings) — only new intimacy can raise it.
+  if (db.pragma("user_version", { simple: true }) < 6) {
+    const relColumns = db.prepare("PRAGMA table_info(relationships)").all();
+    if (!relColumns.some((column) => column.name === "romance")) {
+      db.exec("ALTER TABLE relationships ADD COLUMN romance REAL NOT NULL DEFAULT 0");
+    }
+    db.pragma("user_version = 6");
+  }
   return db;
 }

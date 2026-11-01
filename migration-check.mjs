@@ -59,11 +59,14 @@ if (vecCount !== 2) throw new Error(`migration failed: expected 2 migrated vecto
 const rekeyed = db.prepare("SELECT subject FROM facts WHERE fact LIKE '%PC%'").get();
 if (rekeyed?.subject !== "user:111") throw new Error(`migration failed: fact re-key produced ${rekeyed?.subject}`);
 const version = db.pragma("user_version", { simple: true });
-if (version !== 5) throw new Error(`migration failed: user_version = ${version}`);
+if (version !== 6) throw new Error(`migration failed: user_version = ${version}`);
 if (!db.prepare("PRAGMA table_info(relationships)").all().some((c) => c.name === "last_interacted")) {
   throw new Error("migration failed: relationships.last_interacted missing");
 }
-console.log("Legacy DB migration: OK (guild_id + username added, 2 vectors moved, facts re-keyed to user:111, last_interacted added)");
+if (!db.prepare("PRAGMA table_info(relationships)").all().some((c) => c.name === "romance")) {
+  throw new Error("migration failed: relationships.romance missing");
+}
+console.log("Legacy DB migration: OK (guild_id + username + is_bot added, 2 vectors moved, facts re-keyed to user:111, last_interacted + romance added)");
 
 // --- New message in the upgraded DB, then full hybrid retrieval ---
 const newId = logMessage(db, {
@@ -72,8 +75,8 @@ const newId = logMessage(db, {
 });
 db.prepare("INSERT INTO vec_messages_v(message_id, embedding) VALUES (?, ?)")
   .run(BigInt(newId), Buffer.from(new Float32Array(new Array(384).fill(0.22)).buffer));
-db.prepare("INSERT INTO relationships(user_id, affinity, last_interacted) VALUES (?, ?, ?)")
-  .run("111", 0.8, Date.now() - 3 * 86_400_000);
+db.prepare("INSERT INTO relationships(user_id, affinity, last_interacted, romance) VALUES (?, ?, ?, ?)")
+  .run("111", 0.8, Date.now() - 3 * 86_400_000, 0.9);
 
 const context = buildContext(db, {
   message: {
@@ -89,6 +92,9 @@ if (!context.memoryBlock.includes("Marco is building a new PC")) throw new Error
 if (!context.memoryBlock.includes("Marco (@marco_p) is talking to you right now")) throw new Error("recognition failed: speaker identity not surfaced");
 if (!context.memoryBlock.includes("(@marco_p)")) throw new Error("recognition failed: username handle not surfaced");
 if (!context.memoryBlock.includes("pc together") && !context.memoryBlock.includes("pizza")) throw new Error("retrieval failed: old memories not surfaced");
+// Romance 0.9 is capped by affinity 0.8 + 1 = 1.8 → no cap effect, but still
+// below 1 effective... 0.9 < 1 so no romance line should appear yet.
+if (context.memoryBlock.includes("crush")) throw new Error("romance surfaced below threshold");
 console.log("Hybrid retrieval after migration: OK (facts + old semantic memories + roster surfaced)");
 console.log(`Estimated context tokens: ${context.estimatedTokens}`);
 db.close();

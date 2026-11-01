@@ -76,8 +76,18 @@ Configured environment variables include:
 - `NVIDIA_API_KEYS` (optional key pool, comma-separated)
 - `TIMEZONE` / `TIMEZONE_LABEL` (default `Asia/Manila` / `PHT`)
 
-Admin-only slash commands are `/memory_stats`, `/memories`, `/forget_all`, and
-`/reflect_now`.
+Slash commands everyone can use:
+
+- `/help` — how to talk to her plus the full command list
+- `/relationship` — how she feels about you (friendship tier and, if real,
+  romance; admins can pass a user to inspect someone else)
+- `/status` — uptime, ping, model, and memory stats
+- `/diary` — her latest diary entry
+
+Admin-only slash commands are `/memory_stats`, `/memories`, `/forget_all`,
+`/forget_fact`, `/friends`, `/reflect_now`, and `/reload_personality` (re-reads
+`personality.txt` without a restart). `/forget_fact <user> <text>` removes only
+the matching facts, unlike `/forget_all` which forgets a person completely.
 
 To run the memory round-trip smoke test:
 

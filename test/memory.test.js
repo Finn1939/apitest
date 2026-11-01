@@ -8,9 +8,11 @@ import {
   addFact,
   addHistory,
   buildContext,
+  forgetFacts,
   loadMemory,
   logMessage,
   parseRememberCommand,
+  relationshipSummary,
   saveMemory,
 } from "../src/memory.js";
 import { createMemoryDb } from "../src/db.js";
@@ -265,7 +267,196 @@ test("buildContext names the exact author for a bot reply identity question", ()
   });
 
   assert.match(context.memoryBlock, /CardCompanion's message/);
-  assert.match(context.memoryBlock, /name the author exactly as CardCompanion/);
-  assert.match(context.memoryBlock, /Do not guess another bot or person/);
+  assert.match(context.memoryBlock, /the answer is CardCompanion/);
+  assert.match(context.memoryBlock, /never guess a different bot or person/);
+  // The instruction must stay conditional so it never leaks into her replies.
+  assert.match(context.memoryBlock, /do not bring it up/);
+  rmSync(directory, { recursive: true, force: true });
+});
+
+test("recent conversation labels her own lines and trims bot spam", () => {
+  // The live failure: her own past replies sat in recent conversation as bare
+  // "teacher-san: ..." lines, so the model re-sent them verbatim; and a game
+  // channel's bot output buried every human line.
+  const directory = mkdtempSync(join(tmpdir(), "apitest-recent-labels-"));
+  const db = createMemoryDb(join(directory, "memory.db"));
+  writeFileSync(join(directory, "personality.txt"), "You are a playful Discord companion.");
+
+  logMessage(db, {
+    channelId: "casino", authorId: "u1", authorName: "Ren", username: "ren",
+    content: "balance", createdAt: Date.now() - 70_000, guildId: "guild-1",
+  });
+  logMessage(db, {
+    channelId: "casino", authorId: "bot-1", authorName: "teacher-san", username: "teacher-san",
+    content: "really? I just said I don't like that", createdAt: Date.now() - 60_000, guildId: "guild-1", isBot: true,
+  });
+  // Five OwO lines: only the newest three may survive in recent conversation.
+  for (let index = 1; index <= 5; index += 1) {
+    logMessage(db, {
+      channelId: "casino", authorId: "bot-owo", authorName: "OwO", username: "owo",
+      content: `owo line ${index}`, createdAt: Date.now() - (55 - index) * 1_000, guildId: "guild-1", isBot: true,
+    });
+  }
+  logMessage(db, {
+    channelId: "casino", authorId: "u1", authorName: "Ren", username: "ren",
+    content: "wcf 655", createdAt: Date.now() - 5_000, guildId: "guild-1",
+  });
+
+  const context = buildContext(db, {
+    message: { channelId: "casino", authorId: "u1", authorName: "Ren", content: "wcf 655", guildId: "guild-1" },
+    personalityPath: join(directory, "personality.txt"),
+    botId: "bot-1",
+  });
+
+  const block = context.memoryBlock;
+  // Her own line is labelled so the model knows what it already said.
+  assert.match(block, /You: really\? I just said I don't like that/);
+  // Humans stay unmarked.
+  assert.match(block, /Ren: wcf 655/);
+  // Other bots are marked and capped at the newest three lines.
+  assert.match(block, /OwO \[bot\]: owo line 5/);
+  assert.ok(!block.includes("owo line 1"), "oldest bot line must be dropped");
+  assert.ok(!block.includes("owo line 2"), "second-oldest bot line must be dropped");
+  const botLineCount = (block.match(/\[bot\]:/g) || []).length;
+  assert.ok(botLineCount <= 3, `expected at most 3 bot lines in recent conversation, found ${botLineCount}`);
+  rmSync(directory, { recursive: true, force: true });
+});
+
+test("closeness changes how she should talk, not just how she feels", () => {
+  const directory = mkdtempSync(join(tmpdir(), "apitest-affinity-"));
+  const db = createMemoryDb(join(directory, "memory.db"));
+  writeFileSync(join(directory, "personality.txt"), "You are a playful Discord companion.");
+  logMessage(db, {
+    channelId: "c1", authorId: "u9", authorName: "Ren", username: "ren",
+    content: "sup", createdAt: Date.now(), guildId: "guild-1",
+  });
+  db.prepare("INSERT INTO relationships(user_id, affinity, last_interacted) VALUES (?, ?, ?)")
+    .run("u9", 4.5, Date.now());
+  const opts = {
+    message: { channelId: "c1", authorId: "u9", authorName: "Ren", content: "sup", guildId: "guild-1" },
+    personalityPath: join(directory, "personality.txt"),
+    botId: "bot-1",
+  };
+
+  // A closest-tier regular (affinity 4.5) gets the relaxed, teasing register.
+  const close = buildContext(db, opts);
+  assert.match(close.memoryBlock, /fully relaxed/);
+
+  // The same person after a reset (affinity 0.05) gets the guarded register.
+  db.prepare("UPDATE relationships SET affinity = 0.05 WHERE user_id = ?").run("u9");
+  const guarded = buildContext(db, opts);
+  assert.match(guarded.memoryBlock, /slightly guarded/);
+  assert.doesNotMatch(guarded.memoryBlock, /fully relaxed/);
+
+  // A complete stranger (no relationship row) is told to stay reserved.
+  const stranger = buildContext(db, {
+    ...opts,
+    message: { channelId: "c1", authorId: "u-new", authorName: "Newbie", content: "hi", guildId: "guild-1" },
+  });
+  assert.match(stranger.memoryBlock, /Stay polite, brief and a little reserved/);
+  rmSync(directory, { recursive: true, force: true });
+});
+
+test("romance surfaces by depth and is gated by friendship", () => {
+  const directory = mkdtempSync(join(tmpdir(), "apitest-romance-"));
+  const db = createMemoryDb(join(directory, "memory.db"));
+  writeFileSync(join(directory, "personality.txt"), "You are a playful Discord companion.");
+  logMessage(db, {
+    channelId: "c1", authorId: "u9", authorName: "Ren", username: "ren",
+    content: "sup", createdAt: Date.now(), guildId: "guild-1",
+  });
+  const build = (affinity, romance) => {
+    db.prepare("INSERT OR REPLACE INTO relationships(user_id, affinity, last_interacted, romance) VALUES (?, ?, ?, ?)")
+      .run("u9", affinity, Date.now(), romance);
+    return buildContext(db, {
+      message: { channelId: "c1", authorId: "u9", authorName: "Ren", content: "sup", guildId: "guild-1" },
+      personalityPath: join(directory, "personality.txt"),
+      botId: "bot-1",
+    }).memoryBlock;
+  };
+
+  // Real crush with a deep friendship behind it.
+  assert.match(build(4.5, 2.5), /real crush/);
+  // Fully in love, closest-tier friendship: the guardrails must ride along.
+  const inLove = build(4.5, 4.2);
+  assert.match(inLove, /in love with them/);
+  assert.match(inLove, /non-explicit/);
+  assert.match(inLove, /dial it back/);
+  // Friendship gate: 4.2 stored but affinity only 0.5 → effective 1.5, so the
+  // deepest it can feel today is a budding crush. Griefing cannot skip this.
+  const gated = build(0.5, 4.2);
+  assert.match(gated, /small crush/);
+  assert.doesNotMatch(gated, /in love with them/);
+  assert.doesNotMatch(gated, /falling for them/);
+  // Below 1: invisible entirely — no feelings suggested where there are none.
+  const dormant = build(4.5, 0.4);
+  assert.doesNotMatch(dormant, /crush/);
+  assert.doesNotMatch(dormant, /flustered/);
+  rmSync(directory, { recursive: true, force: true });
+});
+
+test("relationshipSummary shows the same tiers the prompts use", () => {
+  // Stranger-ish: no romance ever suggested.
+  const stranger = relationshipSummary({ affinity: 0.05, romance: 0, lastInteracted: Date.now() });
+  assert.equal(stranger.friendLabel, "someone she's still getting to know");
+  assert.equal(stranger.romanceLabel, null);
+
+  // Close friend with a deep, mutual bond.
+  const closest = relationshipSummary({ affinity: 4.5, romance: 4.2, lastInteracted: Date.now() });
+  assert.equal(closest.friendLabel, "one of her closest people");
+  assert.match(closest.romanceLabel, /in love with you/);
+  assert.equal(closest.daysSinceTalk, 0);
+
+  // Friendship gate: 4.2 stored but they barely know each other, so the
+  // /relationship display can never claim more than a budding crush.
+  const gated = relationshipSummary({ affinity: 0.5, romance: 4.2, lastInteracted: Date.now() });
+  assert.match(gated.romanceLabel, /tiny crush/);
+  assert.ok(gated.effectiveRomance < 2);
+
+  // Romance below 1 stays invisible in the display too.
+  const quiet = relationshipSummary({ affinity: 3, romance: 0.9, lastInteracted: Date.now() });
+  assert.equal(quiet.romanceLabel, null);
+
+  // Days since last talk is derived for the footer line.
+  const away = relationshipSummary({ affinity: 2, romance: 0, lastInteracted: Date.now() - 3 * 86_400_000 });
+  assert.equal(away.daysSinceTalk, 3);
+
+  // No row at all: defaults, no crash.
+  const empty = relationshipSummary({});
+  assert.equal(empty.friendLabel, "someone she's still getting to know");
+  assert.equal(empty.romanceLabel, null);
+  assert.equal(empty.daysSinceTalk, null);
+});
+
+test("forgetFacts removes only matching facts for one subject", () => {
+  const directory = mkdtempSync(join(tmpdir(), "apitest-forgetfact-"));
+  const db = createMemoryDb(join(directory, "memory.db"));
+  const insert = db.prepare(
+    "INSERT INTO facts(subject, fact, confidence, first_seen, last_seen) VALUES (?, ?, ?, ?, ?)",
+  );
+  insert.run("user:u1", "Ren lives in Cebu", 0.9, Date.now(), Date.now());
+  insert.run("user:u1", "Ren plays Karuta daily", 0.9, Date.now(), Date.now());
+  insert.run("user:u1", "Ren's dog is called Bantay", 0.9, Date.now(), Date.now());
+  insert.run("user:u2", "Ren from the other server likes mangoes", 0.9, Date.now(), Date.now());
+
+  // Substring match is case-insensitive and scoped to one subject.
+  const removed = forgetFacts(db, "user:u1", "KARUTA");
+  assert.deepEqual(removed, ["Ren plays Karuta daily"]);
+
+  // Only the two remaining u1 facts survive; u2's Ren fact is untouched.
+  const remaining = db.prepare("SELECT subject, fact FROM facts ORDER BY subject, fact").all();
+  assert.deepEqual(remaining, [
+    { subject: "user:u1", fact: "Ren lives in Cebu" },
+    { subject: "user:u1", fact: "Ren's dog is called Bantay" },
+    { subject: "user:u2", fact: "Ren from the other server likes mangoes" },
+  ]);
+
+  // LIKE wildcards in the query must be treated literally, not as patterns.
+  assert.deepEqual(forgetFacts(db, "user:u1", "100%"), []);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM facts").get().count, 3);
+
+  // Empty or missing queries never delete anything.
+  assert.deepEqual(forgetFacts(db, "user:u1", "   "), []);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM facts").get().count, 3);
   rmSync(directory, { recursive: true, force: true });
 });

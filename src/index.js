@@ -1,14 +1,17 @@
+import { readFileSync } from "node:fs";
 import "dotenv/config";
 import { Client, Events, GatewayIntentBits, Options, Partials } from "discord.js";
 import { config, validateConfig } from "./config.js";
 import { parseCommand } from "./commands.js";
-import { askAI } from "./ai.js";
+import { askAI, completeAI } from "./ai.js";
 import { searchWeb } from "./search.js";
 import {
   addFact,
   addHistory,
+  forgetFacts,
   loadMemory,
   parseRememberCommand,
+  relationshipSummary,
   saveMemory,
   buildContext,
   logMessage,
@@ -18,7 +21,7 @@ import { createJobs, embedText } from "./jobs.js";
 import { streamReply } from "./llm.js";
 import { deliverReply, deliverStreamedReply, renderAliveness } from "./aliveness.js";
 import { renderDiscordMentions } from "./render.js";
-import { isAddressedToBot, isReplyIdentityQuestion, pickIdentityAnswer, shouldResolveReplyTarget } from "./replies.js";
+import { detectIntimacy, isAddressedToBot, isDuplicateReply, isGameCommand, isReplyIdentityQuestion, pickIdentityAnswer, shouldResolveReplyTarget, SPONTANEOUS_OPENERS } from "./replies.js";
 
 validateConfig();
 
@@ -73,6 +76,52 @@ function updateAffinity(userId) {
   `).run(userId, now, now);
 }
 
+// --- Romantic attachment ---------------------------------------------------
+// A second axis, separate from friendship affinity. It only grows from
+// intimacy signals in messages addressed to her, never from chat volume, so
+// a regular she talks to every day stays a friend unless the warmth is there.
+// Three guards stop spam from racing to "in love": a daily budget, the same
+// words only counting once per day, and growth slowing the deeper it is.
+const ROMANCE_DAILY_CAP = 1.0;
+const ROMANCE_MAX = 5;
+const romanceGrowthByUser = new Map();
+
+function updateRomance(userId, { weight, signal }) {
+  const now = new Date();
+  const dayKey = `${now.getFullYear()}-${now.getMonth() + 1}-${now.getDate()}`;
+  let budget = romanceGrowthByUser.get(userId);
+  if (!budget || budget.day !== dayKey) {
+    budget = { day: dayKey, used: 0, signals: new Set() };
+    romanceGrowthByUser.set(userId, budget);
+  }
+  if (budget.used >= ROMANCE_DAILY_CAP) return;
+  const signalKey = `${weight}:${signal}`;
+  if (budget.signals.has(signalKey)) return;
+  budget.signals.add(signalKey);
+
+  const current = memoryDb.prepare("SELECT romance FROM relationships WHERE user_id = ?").get(userId)?.romance ?? 0;
+  if (current >= ROMANCE_MAX) return;
+  const scale = Math.max(0.15, 1 - current / 6);
+  const gain = Math.min(weight * scale, ROMANCE_DAILY_CAP - budget.used);
+  if (gain <= 0) return;
+  budget.used += gain;
+  memoryDb.prepare(`
+    INSERT INTO relationships(user_id, affinity, last_interacted, romance)
+    VALUES (?, 0.05, ?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET romance = MIN(romance + ?, ?), last_interacted = ?
+  `).run(userId, Date.now(), gain, gain, ROMANCE_MAX, Date.now());
+}
+
+// Feelings fade only after a full month of complete silence — never while
+// the conversation is still alive.
+function decayStaleRomance() {
+  memoryDb.prepare(`
+    UPDATE relationships
+    SET romance = MAX(0, romance - 0.05)
+    WHERE romance > 0 AND last_interacted < ?
+  `).run(Date.now() - 30 * 24 * 60 * 60_000);
+}
+
 function randomDelay(minMinutes, maxMinutes) {
   return (minMinutes + Math.random() * (maxMinutes - minMinutes)) * 60_000;
 }
@@ -103,11 +152,34 @@ function isEngaged(channelId, userId) {
   return true;
 }
 
-// Short bot-game commands (Karuta etc.) that should never count as conversation.
-const GAME_COMMAND_RE = /^(?:k(?:d|l|g|c|u|i|q|t|v|w|m|a)?|dk|grab|drop|burn|daily|vote|inv(?:entory)?|collection|wishlist|worker|observe)$/;
+// Short bot-game commands (Karuta, OwO, Dank-style) that should never count as
+// conversation. The pattern itself lives in replies.js so tests can cover it.
 
-function isGameCommand(content) {
-  return GAME_COMMAND_RE.test(content.trim().toLowerCase().replace(/[.!]+$/, ""));
+function lastAssistantReply(channelId) {
+  const history = conversations.get(channelId) || [];
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    if (history[index]?.role === "assistant") return history[index].content;
+  }
+  return null;
+}
+
+function dupNudge(prompt, lastText) {
+  return `${prompt}\n\n[System instruction, never mention it: your previous message was already almost exactly "${String(lastText).slice(0, 200)}". Repeating yourself word-for-word is broken behavior — reply with clearly different words this time.]`;
+}
+
+// One retry when a fresh reply is a verbatim repeat of her last reply in that
+// channel. Keeps the first answer if the retry fails or repeats again.
+async function dedupeAnswer(channelId, basePrompt, answer, regenerate) {
+  const last = lastAssistantReply(channelId);
+  if (!last || !answer || !isDuplicateReply(answer, last)) return answer;
+  try {
+    const retry = await regenerate(dupNudge(basePrompt, last));
+    if (retry && !isDuplicateReply(retry, last)) return retry.trim();
+    console.warn("Dedup retry still repeated; keeping the first answer.");
+  } catch (error) {
+    console.warn("Dedup retry failed:", error.message);
+  }
+  return answer;
 }
 
 // A channel the bot has already learned is a bot-game channel (e.g. Karuta).
@@ -228,15 +300,44 @@ function factsContext(channelId) {
   return facts.length ? `Things explicitly remembered in this channel:\n${facts.map((fact) => `- ${fact}`).join("\n")}` : "";
 }
 
+// Recent human lines give "follow up on what people were talking about" openers
+// something real to hook into. Bot output is never included.
+function recentHumanLines(channelId, limit = 8) {
+  const rows = memoryDb.prepare(`
+    SELECT author_name, content FROM messages
+    WHERE channel_id = ? AND is_bot = 0
+    ORDER BY id DESC LIMIT ?
+  `).all(channelId, limit).reverse();
+  return rows.map((row) => `${row.author_name}: ${row.content}`).join("\n");
+}
+
+// Composed per message: a rotating opener angle (so openings stop feeling
+// samey) plus the channel's recent human conversation as hook-in context.
+function spontaneousPromptFor(channelId) {
+  const opener = SPONTANEOUS_OPENERS[Math.floor(Math.random() * SPONTANEOUS_OPENERS.length)];
+  const recent = recentHumanLines(channelId);
+  const recentNote = recent
+    ? `\nRecent human conversation in this channel (context only — never repeat it word for word):\n${recent}`
+    : "";
+  return `Start a brief, natural conversation in this Discord channel. ${opener} One short message only. Do not mention commands or that you are a bot.${recentNote}`;
+}
+
 async function sendSpontaneousMessage(channel) {
   const lastReply = spontaneousReplies.get(channel.id) || 0;
   if (Date.now() - lastReply < config.spontaneousCooldownMs) return;
 
-  const answer = await askAI({
-    prompt: "Start a brief, natural conversation in this Discord channel. Say one short thing, react to the general mood, or ask a light question. Do not mention commands or that you are a bot.",
+  const prompt = spontaneousPromptFor(channel.id);
+  let answer = await askAI({
+    prompt,
     personality: config.personality,
     systemContext: renderAliveness(new Date(), lastSpokeAtRef.value),
   });
+  answer = await dedupeAnswer(channel.id, prompt, answer, (nudged) =>
+    askAI({
+      prompt: nudged,
+      personality: config.personality,
+      systemContext: renderAliveness(new Date(), lastSpokeAtRef.value),
+    }));
   await deliverReply({ channel, react: async () => {} }, answer, {
     lastSpokeAtRef,
     spontaneous: true,
@@ -265,10 +366,22 @@ client.once(Events.ClientReady, (readyClient) => {
   // mark them so they never count as human activity.
   memoryDb.prepare("UPDATE messages SET is_bot = 1 WHERE author_id = ?").run(readyClient.user.id);
   readyClient.application.commands.set([
+    // Everyone
+    { name: "help", description: "How to talk to her and everything she can do" },
+    { name: "relationship", description: "How she feels about you", options: [{ name: "user", description: "Someone else (admins only)", type: 6, required: false }] },
+    { name: "status", description: "Uptime, ping, and memory stats" },
+    { name: "diary", description: "Read her latest diary entry" },
+    // Admin only
     { name: "memory_stats", description: "Show persistent memory statistics" },
     { name: "memories", description: "Show remembered facts for a user", options: [{ name: "user", description: "Member to inspect", type: 6, required: true }] },
     { name: "forget_all", description: "Forget a user's facts", options: [{ name: "user", description: "Member to forget", type: 6, required: true }] },
     { name: "reflect_now", description: "Run a self-reflection immediately" },
+    { name: "friends", description: "Her closest bonds and feelings overview" },
+    { name: "forget_fact", description: "Remove one remembered fact for a user", options: [
+      { name: "user", description: "Member to edit", type: 6, required: true },
+      { name: "text", description: "Part of the fact to remove", type: 3, required: true },
+    ] },
+    { name: "reload_personality", description: "Re-read the personality file without a restart" },
   ]).catch((error) => console.error("Failed to register memory commands:", error));
   setTimeout(scheduleSpontaneousMessages, randomDelay(20, 50));
   // Warm the local embedding model so the first live reply is not slow.
@@ -277,6 +390,7 @@ client.once(Events.ClientReady, (readyClient) => {
   // Daily housekeeping: fact decay (once a day, not every 10 minutes) + nightly journal.
   setInterval(() => jobs.backgroundQueue.add(async () => {
     jobs.decay();
+    decayStaleRomance();
     await jobs.writeJournal();
   }), 24 * 60 * 60_000).unref();
 });
@@ -285,28 +399,210 @@ function isAdmin(interaction) {
   return config.adminUserIds.has(interaction.user.id);
 }
 
+// Commands everyone can use, vs. the admin-only maintenance set. Feelings of
+// OTHER people (the /friends overview) stay admin-only: romance is personal.
+const PUBLIC_COMMANDS = new Set(["help", "relationship", "status", "diary"]);
+const ADMIN_COMMANDS = new Set([
+  "memory_stats", "memories", "forget_all", "reflect_now",
+  "friends", "forget_fact", "reload_personality",
+]);
+
+// Latest known display name for a Discord user id, from what she has seen.
+function displayNameFor(userId) {
+  return memoryDb.prepare(
+    "SELECT author_name FROM messages WHERE author_id = ? ORDER BY id DESC LIMIT 1",
+  ).get(userId)?.author_name || `<@${userId}>`;
+}
+
+function meterBar(value, max = 5, width = 10) {
+  const ratio = Math.max(0, Math.min(1, value / max));
+  const filled = Math.round(ratio * width);
+  return `${"■".repeat(filled)}${"─".repeat(width - filled)}`;
+}
+
+function formatUptime(seconds) {
+  const days = Math.floor(seconds / 86_400);
+  const hours = Math.floor((seconds % 86_400) / 3_600);
+  const minutes = Math.floor((seconds % 3_600) / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
+}
+
+function helpText(forAdmin) {
+  const name = client.user.username;
+  const adminLines = forAdmin
+    ? [
+      "",
+      "**Admin only**",
+      "- `/memories <user>` — everything she remembers about someone",
+      "- `/forget_fact <user> <text>` — remove one wrong fact",
+      "- `/forget_all <user>` — forget someone completely",
+      "- `/friends` — her bonds overview",
+      "- `/memory_stats`, `/reflect_now`, `/reload_personality` — maintenance",
+    ]
+    : [];
+  return [
+    `**How to talk to ${name}**`,
+    `- Mention her, reply to her message, or just keep chatting — she keeps the thread for ${Math.round(config.convoEngageMs / 60_000)} minutes after she replies`,
+    "- DMs are always welcome",
+    `- \`${config.prefix} <question>\` — searches the web and answers with sources`,
+    '- "remember this: ..." — she saves it for the channel',
+    '- "forget everything" — clears this channel\'s memory',
+    "",
+    "**Commands**",
+    "- `/relationship` — how she feels about you",
+    "- `/diary` — her latest diary entry",
+    "- `/status` — uptime, ping, and memory",
+    "- `/help` — this list",
+    ...adminLines,
+    "",
+    "Friendship grows just by talking. Anything deeper has to be earned.",
+  ].join("\n");
+}
+
 client.on(Events.InteractionCreate, async (interaction) => {
-  if (!interaction.isChatInputCommand() || !isAdmin(interaction)) return;
-  if (!["memory_stats", "memories", "forget_all", "reflect_now"].includes(interaction.commandName)) return;
-  await interaction.deferReply({ ephemeral: true });
-  if (interaction.commandName === "memory_stats") {
+  if (!interaction.isChatInputCommand()) return;
+  const name = interaction.commandName;
+  if (!PUBLIC_COMMANDS.has(name) && !ADMIN_COMMANDS.has(name)) return;
+  if (ADMIN_COMMANDS.has(name) && !isAdmin(interaction)) return;
+  // Personal or maintenance output is only for the invoker; help/status/diary
+  // are fine to leave visible so others can learn the commands.
+  const ephemeral = name !== "help" && name !== "status" && name !== "diary";
+  await interaction.deferReply({ ephemeral });
+  const botName = client.user.username;
+
+  if (name === "help") {
+    await interaction.editReply(helpText(isAdmin(interaction)));
+  } else if (name === "relationship") {
+    // Non-admins can only ever look at themselves; admins may inspect anyone.
+    const target = isAdmin(interaction)
+      ? (interaction.options.getUser("user") ?? interaction.user)
+      : interaction.user;
+    const row = memoryDb.prepare(
+      "SELECT affinity, romance, last_interacted FROM relationships WHERE user_id = ?",
+    ).get(target.id);
+    const targetName = target.id === interaction.user.id
+      ? (interaction.member?.displayName || target.username)
+      : target.displayName || target.username;
+    if (!row || (row.affinity <= 0 && row.last_interacted <= 0)) {
+      await interaction.editReply(
+        `**${botName}** and **${targetName}** haven't really talked yet — say hi sometime!`,
+      );
+      return;
+    }
+    const summary = relationshipSummary(row);
+    const lines = [
+      `How **${botName}** feels about **${targetName}**:`,
+      "",
+      `**Friendship** — ${summary.friendLabel}`,
+      `\`${meterBar(row.affinity)}\``,
+    ];
+    if (summary.romanceLabel) {
+      lines.push(`**Romance** — she ${summary.romanceLabel}`);
+      lines.push(`\`${meterBar(summary.effectiveRomance)}\``);
+    } else {
+      lines.push("**Romance** — just friends, nothing more");
+    }
+    if (summary.daysSinceTalk !== null && summary.daysSinceTalk >= 1) {
+      lines.push("", `Last really talked: ${summary.daysSinceTalk === 1 ? "yesterday" : `${summary.daysSinceTalk} days ago`}`);
+    }
+    await interaction.editReply(lines.join("\n"));
+  } else if (name === "status") {
+    const messages = memoryDb.prepare("SELECT COUNT(*) AS count FROM messages").get().count;
+    const facts = memoryDb.prepare("SELECT COUNT(*) AS count FROM facts").get().count;
+    const journal = memoryDb.prepare("SELECT COUNT(*) AS count FROM journal").get().count;
+    const model = memoryDb.prepare("SELECT updated_at FROM self_model WHERE id = 1").get();
+    const ping = client.ws.ping >= 0 ? `${Math.round(client.ws.ping)}ms` : "measuring…";
+    const rss = process.memoryUsage().rss / 1024 / 1024;
+    await interaction.editReply([
+      `**${botName} status**`,
+      `Uptime: ${formatUptime(process.uptime())} | Ping: ${ping}`,
+      `Model: \`${config.aiModel}\``,
+      `Memory: ${Math.round(rss)} MB RSS`,
+      `Brain: ${messages} messages, ${facts} facts, ${journal} diary entries`,
+      `Self-image refreshed ${Math.max(1, Math.round((Date.now() - model.updated_at) / 36e5))}h ago`,
+    ].join("\n"));
+  } else if (name === "diary") {
+    const entry = memoryDb.prepare(
+      "SELECT entry, created_at FROM journal ORDER BY created_at DESC LIMIT 1",
+    ).get();
+    if (!entry) {
+      await interaction.editReply(
+        `**${botName}** hasn't written in her diary yet — she does that at night, after a day worth remembering.`,
+      );
+      return;
+    }
+    const written = new Date(entry.created_at).toISOString().slice(0, 10);
+    await interaction.editReply(`**${botName}'s diary — ${written}**\n\n${entry.entry}`);
+  } else if (name === "memory_stats") {
     const messages = memoryDb.prepare("SELECT COUNT(*) AS count FROM messages").get().count;
     const facts = memoryDb.prepare("SELECT COUNT(*) AS count FROM facts").get().count;
     const journal = memoryDb.prepare("SELECT COUNT(*) AS count FROM journal").get().count;
     const last = memoryDb.prepare("SELECT MAX(created_at) AS value FROM summaries").get().value;
     const model = memoryDb.prepare("SELECT updated_at FROM self_model WHERE id = 1").get();
     await interaction.editReply(`Messages: ${messages}\nFacts: ${facts}\nJournal entries: ${journal}\nLast consolidation: ${last ? new Date(last).toISOString() : "never"}\nSelf-model age: ${Math.round((Date.now() - model.updated_at) / 36e5)} hours`);
-  } else if (interaction.commandName === "memories") {
+  } else if (name === "memories") {
     const user = interaction.options.getUser("user");
     const rows = memoryDb.prepare(`
       SELECT fact FROM facts WHERE subject = ? ORDER BY hits DESC, last_seen DESC LIMIT 20
     `).all(`user:${user.id}`);
     await interaction.editReply(rows.length ? rows.map(({ fact }) => `- ${fact}`).join("\n") : "No memories for that user.");
-  } else if (interaction.commandName === "forget_all") {
+  } else if (name === "forget_all") {
     const user = interaction.options.getUser("user");
     memoryDb.prepare("DELETE FROM facts WHERE subject = ?").run(`user:${user.id}`);
-    await interaction.editReply(`Forgot facts for ${user.username}.`);
-  } else {
+    // Forgetting someone means the feelings too — the admin's escape hatch
+    // against griefing the romance meter.
+    memoryDb.prepare("DELETE FROM relationships WHERE user_id = ?").run(user.id);
+    await interaction.editReply(`Forgot facts and feelings for ${user.username}.`);
+  } else if (name === "friends") {
+    const friends = memoryDb.prepare(`
+      SELECT user_id, affinity, romance FROM relationships
+      WHERE affinity > 0 ORDER BY affinity DESC LIMIT 10
+    `).all();
+    const crushes = memoryDb.prepare(`
+      SELECT user_id, affinity, romance FROM relationships
+      WHERE romance > 0 ORDER BY romance DESC LIMIT 10
+    `).all();
+    const friendLines = friends.map((row) => {
+      const summary = relationshipSummary(row);
+      const crush = summary.romanceLabel ? ` (and she ${summary.romanceLabel.replace("you", "them")})` : "";
+      return `- ${displayNameFor(row.user_id)} — ${summary.friendLabel}${crush}`;
+    });
+    const crushLines = crushes.map((row) => {
+      const summary = relationshipSummary(row);
+      return `- ${displayNameFor(row.user_id)} — she ${summary.romanceLabel.replace("you", "them")}`;
+    });
+    await interaction.editReply([
+      `**${botName}'s bonds**`,
+      "",
+      "**Closest friends**",
+      friendLines.length ? friendLines.join("\n") : "Nobody yet — go talk to her!",
+      "",
+      "**Feelings**",
+      crushLines.length ? crushLines.join("\n") : "No romance brewing.",
+    ].join("\n"));
+  } else if (name === "forget_fact") {
+    const user = interaction.options.getUser("user");
+    const text = interaction.options.getString("text");
+    const removed = forgetFacts(memoryDb, `user:${user.id}`, text);
+    if (!removed.length) {
+      await interaction.editReply(`No facts about ${user.username} match "${text.slice(0, 80)}".`);
+      return;
+    }
+    const shown = removed.slice(0, 5).map((fact) => `- ${fact}`);
+    const more = removed.length > 5 ? `\n…and ${removed.length - 5} more` : "";
+    await interaction.editReply(`Removed ${removed.length} fact${removed.length === 1 ? "" : "s"} about ${user.username}:\n${shown.join("\n")}${more}`);
+  } else if (name === "reload_personality") {
+    try {
+      const fresh = readFileSync(config.personalityPath, "utf8").trim();
+      if (!fresh) throw new Error("the file is empty");
+      config.personality = fresh;
+      await interaction.editReply(`Personality reloaded from \`${config.personalityPath}\` (${fresh.length} characters). No restart needed.`);
+    } catch (error) {
+      await interaction.editReply(`Reload failed (${error.message}) — keeping the current personality.`);
+    }
+  } else if (name === "reflect_now") {
     await jobs.backgroundQueue.add(() => jobs.reflect());
     await interaction.editReply("Self-reflection completed.");
   }
@@ -333,8 +629,10 @@ client.on(Events.MessageCreate, async (message) => {
     return;
   }
 
-  const karutaCommand = isGameCommand(message.content);
-  if (karutaCommand) {
+  // Game commands (Karuta/OwO/Dank-style) never count as conversation; they
+  // also drive the bot-game channel learning below.
+  const gameCommand = isGameCommand(message.content);
+  if (gameCommand) {
     const count = (botCommandCountByChannel.get(message.channel.id) || 0) + 1;
     botCommandCountByChannel.set(message.channel.id, count);
     if (count >= 5 && (botActivityByChannel.get(message.channel.id) || 0) >= 5) {
@@ -384,10 +682,17 @@ client.on(Events.MessageCreate, async (message) => {
     botUsername: client.user.username,
     recentBotMessage: Date.now() - (lastBotMessageAtByChannel.get(message.channel.id) || 0) <= 5 * 60_000,
   });
+  // A Discord reply aimed at another bot is a command for that bot, not a
+  // continuation of a conversation with her. mentions.repliedUser is free
+  // gateway data — no REST call needed to know this.
+  const repliedUser = message.mentions?.repliedUser;
+  const replyingToAnotherBot = !mentioned
+    && Boolean(repliedUser?.bot)
+    && repliedUser.id !== client.user.id;
   // In a DM, every message is talking to her.
-  const engaged = !inDm && !karutaCommand
+  const engaged = inDm || (!gameCommand && !replyingToAnotherBot && !isLearnedGameChannel(message.channel.id)
     ? isEngaged(message.channel.id, message.author.id)
-    : inDm;
+    : false);
   const command = parseCommand(message.content, config.prefix);
   const needsReplyTarget = shouldResolveReplyTarget({
     hasReference: Boolean(message.reference?.messageId),
@@ -400,6 +705,12 @@ client.on(Events.MessageCreate, async (message) => {
   // A reply aimed at her (even with the ping toggled off) is always for her.
   const replyingToMe = replyTarget?.isSelf === true;
   const addressed = mentioned || replyingToMe || engaged || inDm || heuristicAddressed;
+  // Romance only grows from intimacy in messages aimed at her — never from
+  // commands or game traffic.
+  if (addressed && !command && !gameCommand) {
+    const intimacy = detectIntimacy(renderedContent);
+    if (intimacy) updateRomance(message.author.id, intimacy);
+  }
   if (!addressed && command === null) {
     const lastReply = spontaneousReplies.get(message.channel.id) || 0;
     const canReply = Date.now() - lastReply >= config.spontaneousCooldownMs;
@@ -417,11 +728,18 @@ client.on(Events.MessageCreate, async (message) => {
       const replyNote = noteTarget
         ? ` They sent it as a Discord reply to ${noteTarget.isSelf ? "your earlier message" : `${noteTarget.authorName}'s message${noteTarget.content ? ` ("${noteTarget.content}")` : ""}`}.`
         : "";
-      const answer = await askAI({
-        prompt: `Someone in Discord said: "${renderedContent}".${replyNote} React naturally, only if there is a reason to join in. If you would add nothing useful, answer exactly: NO_REPLY.`,
+      const chimePrompt = `Someone in Discord said: "${renderedContent}".${replyNote} React naturally, only if there is a reason to join in. If you would add nothing useful, answer exactly: NO_REPLY.`;
+      let answer = await askAI({
+        prompt: chimePrompt,
         personality: config.personality,
         systemContext: renderAliveness(new Date(), lastSpokeAtRef.value),
       });
+      answer = await dedupeAnswer(message.channel.id, chimePrompt, answer, (nudged) =>
+        askAI({
+          prompt: nudged,
+          personality: config.personality,
+          systemContext: renderAliveness(new Date(), lastSpokeAtRef.value),
+        }));
       if (!/^no[_\s-]?reply$/i.test(answer.trim())) {
         await deliverReply(message, answer, { lastSpokeAtRef });
         updateAffinity(message.author.id);
@@ -526,8 +844,20 @@ client.on(Events.MessageCreate, async (message) => {
         },
         { role: "user", content: prompt },
       ];
+      const lastOwnReply = lastAssistantReply(message.channel.id);
       answer = await deliverStreamedReply(message, (onDelta) => streamReply({ messages, onDelta }), {
         lastSpokeAtRef,
+        // If the stream produced a verbatim repeat of what she just said in
+        // this channel, regenerate once and swap it in before anyone reads it.
+        dupCheck: lastOwnReply ? async (streamedText) => {
+          if (!isDuplicateReply(streamedText, lastOwnReply)) return null;
+          const retry = await completeAI({
+            messages: [...messages.slice(0, -1), { role: "user", content: dupNudge(prompt, lastOwnReply) }],
+            thinking: false,
+            maxTokens: 512,
+          });
+          return isDuplicateReply(retry, lastOwnReply) ? null : retry;
+        } : undefined,
       });
       delivered = true;
     }

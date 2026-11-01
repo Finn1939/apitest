@@ -93,7 +93,11 @@ export async function deliverReply(message, answer, { lastSpokeAtRef, spontaneou
 // Streams a reply into Discord by editing one message as tokens arrive, so the
 // character appears to type in real time. Returns the final text, or "" if the
 // stream failed (a fallback message is sent in that case).
-export async function deliverStreamedReply(message, produce, { lastSpokeAtRef } = {}) {
+//
+// dupCheck(text) -> Promise<string|null>: called once with the finished text.
+// If it resolves to a non-empty string, that string replaces the streamed text
+// in the message (used to swap out a verbatim repeat of her previous reply).
+export async function deliverStreamedReply(message, produce, { lastSpokeAtRef, dupCheck } = {}) {
   let sent = null;
   try {
     await message.channel.sendTyping();
@@ -110,9 +114,18 @@ export async function deliverStreamedReply(message, produce, { lastSpokeAtRef } 
     });
     const text = (finalText || buffer).trim().slice(0, 2000);
     if (!text) throw new Error("empty stream");
-    await sent.edit(text);
+    let final = text;
+    if (dupCheck) {
+      try {
+        const replacement = await dupCheck(text);
+        if (replacement && replacement.trim()) final = replacement.trim().slice(0, 2000);
+      } catch (error) {
+        console.warn("Dedup check failed; keeping the streamed text:", error.message);
+      }
+    }
+    await sent.edit(final);
     if (lastSpokeAtRef) lastSpokeAtRef.value = Date.now();
-    const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
+    const wordCount = final.trim().split(/\s+/).filter(Boolean).length;
     if (wordCount <= 8 && Math.random() < 1 / 6) {
       try {
         await message.react(["🙂", "👀", "✨", "😄", "🫡"][Math.floor(Math.random() * 5)]);
@@ -120,7 +133,7 @@ export async function deliverStreamedReply(message, produce, { lastSpokeAtRef } 
         // Reactions are best-effort.
       }
     }
-    return text;
+    return final;
   } catch (error) {
     console.error("Streamed reply failed:", error);
     const fallback = "My brain tripped for a second. Please try again.";
