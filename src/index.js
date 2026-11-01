@@ -18,7 +18,7 @@ import { createJobs, embedText } from "./jobs.js";
 import { streamReply } from "./llm.js";
 import { deliverReply, deliverStreamedReply, renderAliveness } from "./aliveness.js";
 import { renderDiscordMentions } from "./render.js";
-import { isAddressedToBot, isReplyIdentityQuestion } from "./replies.js";
+import { isAddressedToBot, isReplyIdentityQuestion, replyAuthorsAgree } from "./replies.js";
 
 validateConfig();
 
@@ -91,24 +91,39 @@ function isLearnedGameChannel(channelId) {
 async function resolveReplyTarget(message) {
   const referenceId = message.reference?.messageId;
   if (!referenceId) return null;
-  // No referencedMessage property exists in discord.js 14: resolve via cache,
-  // fetchReference(), or a direct channel fetch, in that order.
-  let ref = message.channel?.messages?.cache?.get(referenceId) || null;
+  const cached = message.channel?.messages?.cache?.get(referenceId) || null;
+  let fetchedReference = null;
+  let channelFetch = null;
   try {
-    if (!ref) ref = await message.fetchReference();
+    fetchedReference = await message.fetchReference();
   } catch {
-    ref = null; // the referenced message may be deleted or too old to fetch
+    fetchedReference = null;
   }
   try {
-    if (!ref && message.channel?.messages?.fetch) {
-      ref = await message.channel.messages.fetch(referenceId);
+    if (message.channel?.messages?.fetch) {
+      channelFetch = await message.channel.messages.fetch(referenceId);
     }
   } catch {
-    ref = null;
+    channelFetch = null;
   }
+
+  const references = [cached, fetchedReference, channelFetch].filter(Boolean);
+  const authorIds = references.filter((ref) => ref.author?.id).map((ref) => ref.author.id);
+  if (!replyAuthorsAgree(authorIds)) {
+    console.warn(`Reply target sources disagree for message ${message.id}; refusing to guess.`);
+    return null;
+  }
+
+  const ref = fetchedReference || channelFetch || cached;
   if (ref?.author) {
+    const repliedUser = message.mentions?.repliedUser;
+    if (repliedUser && repliedUser.id !== ref.author.id) {
+      console.warn(`Reply author metadata disagrees with the message reference for message ${message.id}; refusing to guess.`);
+      return null;
+    }
     return {
       authorName: ref.member?.displayName || ref.author.globalName || ref.author.username || "someone",
+      authorId: ref.author.id,
       isSelf: ref.author.id === client.user.id,
       content: renderDiscordMentions(ref.content || "", {
         users: ref.mentions?.users,
@@ -124,6 +139,7 @@ async function resolveReplyTarget(message) {
   const member = message.mentions?.members?.get(user.id);
   return {
     authorName: member?.displayName || user.globalName || user.displayName || user.username || "someone",
+    authorId: user.id,
     isSelf: user.id === client.user.id,
     content: "",
     ageMs: 0,

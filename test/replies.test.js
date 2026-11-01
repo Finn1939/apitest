@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isAddressedToBot, isReplyIdentityQuestion } from "../src/replies.js";
+import { isAddressedToBot, isReplyIdentityQuestion, replyAuthorsAgree } from "../src/replies.js";
 
 test("recognizes follow-up reply identity questions", () => {
   assert.equal(isReplyIdentityQuestion("how about now?"), true);
@@ -21,4 +21,10 @@ test("recognizes direct address without a mention or reply", () => {
   assert.equal(isAddressedToBot("sprite vodka is telling a story"), false);
   assert.equal(isAddressedToBot("and this one?", { recentBotMessage: true }), true);
   assert.equal(isAddressedToBot("what happened next", { recentBotMessage: true }), false);
+});
+
+test("refuses conflicting Discord reply authors", () => {
+  assert.equal(replyAuthorsAgree(["user-a", "user-a"]), true);
+  assert.equal(replyAuthorsAgree(["user-a", "user-b"]), false);
+  assert.equal(replyAuthorsAgree([undefined, "user-a"]), true);
 });

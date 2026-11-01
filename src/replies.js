@@ -28,3 +28,8 @@ export function isAddressedToBot(content, options = {}) {
   const clearlyAddressesAnotherUser = /<@!?\d+>|@[\w-]+/.test(content || "");
   return !clearlyAddressesAnotherUser && (/\?\s*$/.test(text.trim()) || /^(?:please|can you|could you|would you|will you|do you|are you)\b/.test(text.trim()));
 }
+
+export function replyAuthorsAgree(authorIds) {
+  const resolved = [...new Set(authorIds.filter(Boolean))];
+  return resolved.length <= 1;
+}
