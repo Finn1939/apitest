@@ -85,7 +85,7 @@ export function logMessage(db, message) {
   ).lastInsertRowid;
 }
 
-export function buildContext(db, { message, embedVector, personalityPath = "personality.txt", deepRecall = false, botId = "" }) {
+export function buildContext(db, { message, embedVector, personalityPath = "personality.txt", deepRecall = false, botId = "", replyTo = null }) {
   const personality = truncateTokens(readFileSync(personalityPath, "utf8").trim(), 500);
   const selfModel = truncateTokens(
     db.prepare("SELECT persona FROM self_model WHERE id = 1").get()?.persona || "",
@@ -112,6 +112,17 @@ export function buildContext(db, { message, embedVector, personalityPath = "pers
     }
   } else {
     speakerLines.push("You do not know them yet; this may be your first real exchange.");
+  }
+  // If they used Discord's reply feature, name the message they replied to —
+  // this is how "tell me his user" becomes answerable instead of ambiguous.
+  if (replyTo?.authorName) {
+    const target = replyTo.isSelf ? "your earlier message" : `${replyTo.authorName}'s message`;
+    speakerLines.push(
+      `They used Discord's reply on ${target}${replyTo.content ? ` — "${replyTo.content}"` : " (its text is unavailable)"}.`,
+    );
+    if (!replyTo.isSelf) {
+      speakerLines.push(`When they say "he", "him" or "his", they most likely mean ${replyTo.authorName}.`);
+    }
   }
   const speakerText = speakerLines.join(" ");
 

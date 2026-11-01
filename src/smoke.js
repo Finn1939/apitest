@@ -18,6 +18,10 @@ const ids = [
     channelId: "smoke-channel", authorId: "smoke-user", authorName: "Smoke User", username: "smoke_user",
     content: "do you remember the pc build?", createdAt: Date.now(), guildId: "smoke-guild",
   }),
+  logMessage(db, {
+    channelId: "smoke-channel", authorId: "other-user", authorName: "Other User", username: "other_user",
+    content: "the zip wont load", createdAt: Date.now() - 120_000, guildId: "smoke-guild",
+  }),
 ];
 for (const id of ids) {
   db.prepare("INSERT INTO vec_messages_v(message_id, embedding) VALUES (?, ?)")
@@ -37,12 +41,15 @@ const context = buildContext(db, {
   deepRecall: true,
   personalityPath: "personality.txt",
   botId: "smoke-bot",
+  replyTo: { authorName: "Other User", isSelf: false, content: "the zip wont load", ageMs: 120_000 },
 });
 const needles = [
   "Smoke User (@smoke_user) is talking to you right now",   // speaker recognition + handle
   "a regular you are genuinely fond of",       // affinity tier
   "building a new PC",                         // speaker facts
   "pc together",                               // semantic recall of the old message
+  "Other User's message",                      // Discord reply target resolved
+  "most likely mean Other User",               // pronoun resolution hint
 ];
 for (const needle of needles) {
   if (!context.memoryBlock.includes(needle)) throw new Error(`Memory round-trip failed: missing "${needle}"`);

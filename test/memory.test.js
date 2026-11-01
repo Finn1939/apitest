@@ -1,16 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   FACT_LIMIT,
   addFact,
   addHistory,
+  buildContext,
   loadMemory,
+  logMessage,
   parseRememberCommand,
   saveMemory,
 } from "../src/memory.js";
+import { createMemoryDb } from "../src/db.js";
 
 test("limits channel history to the newest entries", () => {
   const history = Array.from({ length: 35 }, (_, index) => ({ role: "user", content: String(index) }));
@@ -47,4 +50,56 @@ test("persists conversation history and facts across restarts", () => {
   assert.deepEqual(restored.facts.get("channel-1"), ["Alex likes banana jokes"]);
   assert.deepEqual(JSON.parse(readFileSync(filePath, "utf8")).facts["channel-1"], ["Alex likes banana jokes"]);
   rmSync(directory, { recursive: true });
+});
+
+test("buildContext tells her who a Discord reply was aimed at", () => {
+  // Replays the real failure: someone replied to Manu's message and asked
+  // "tell me his user" — she used to ask "which 'him'?" because she never
+  // saw the reply link.
+  const directory = mkdtempSync(join(tmpdir(), "apitest-reply-"));
+  const db = createMemoryDb(join(directory, "memory.db"));
+  writeFileSync(join(directory, "personality.txt"), "You are a playful Discord companion.");
+  logMessage(db, {
+    channelId: "channel-1",
+    authorId: "user-manu",
+    authorName: "Manu",
+    username: "manu",
+    content: "Ayaw magloading ng zip",
+    createdAt: Date.now() - 60_000,
+    guildId: "guild-1",
+  });
+
+  const context = buildContext(db, {
+    message: {
+      channelId: "channel-1",
+      authorId: "user-sprite",
+      authorName: "sprite vodka",
+      content: "tell me his user",
+      guildId: "guild-1",
+    },
+    personalityPath: join(directory, "personality.txt"),
+    botId: "bot-1",
+    replyTo: { authorName: "Manu", isSelf: false, content: "Ayaw magloading ng zip", ageMs: 60_000 },
+  });
+
+  assert.match(context.memoryBlock, /Manu's message/);
+  assert.match(context.memoryBlock, /"Ayaw magloading ng zip"/);
+  assert.match(context.memoryBlock, /most likely mean Manu/);
+  // The roster must still be there so she can actually answer "his user".
+  assert.match(context.memoryBlock, /Manu \(@manu\)/);
+  rmSync(directory, { recursive: true, force: true });
+});
+
+test("buildContext without a reply stays silent about replies", () => {
+  const directory = mkdtempSync(join(tmpdir(), "apitest-noreply-"));
+  const db = createMemoryDb(join(directory, "memory.db"));
+  writeFileSync(join(directory, "personality.txt"), "You are a playful Discord companion.");
+  const context = buildContext(db, {
+    message: { channelId: "channel-1", authorId: "u1", authorName: "Alex", content: "hello there", guildId: "guild-1" },
+    personalityPath: join(directory, "personality.txt"),
+    botId: "bot-1",
+  });
+  assert.doesNotMatch(context.memoryBlock, /Discord's reply/);
+  assert.doesNotMatch(context.memoryBlock, /most likely mean/);
+  rmSync(directory, { recursive: true, force: true });
 });

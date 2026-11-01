@@ -83,6 +83,41 @@ function isLearnedGameChannel(channelId) {
   return facts.some((fact) => fact.includes("bot-game channel"));
 }
 
+// What message did they hit Discord's "reply" on? Without this, "his user"
+// in a reply to someone else's message is an unresolvable pronoun. Returns
+// null for normal messages, so the common path stays free of extra work.
+async function resolveReplyTarget(message) {
+  const referenceId = message.reference?.messageId;
+  if (!referenceId) return null;
+  let ref = message.channel?.messages?.cache?.get(referenceId) || null;
+  try {
+    if (!ref) ref = await message.fetchReference();
+  } catch {
+    ref = null; // the referenced message may be deleted or too old to fetch
+  }
+  if (ref?.author) {
+    return {
+      authorName: ref.member?.displayName || ref.author.globalName || ref.author.username || "someone",
+      isSelf: ref.author.id === client.user.id,
+      content: renderDiscordMentions(ref.content || "", {
+        users: ref.mentions?.users,
+        roles: ref.mentions?.roles,
+        channels: ref.mentions?.channels,
+      }).replace(/\s+/g, " ").trim().slice(0, 200),
+      ageMs: Math.max(0, message.createdTimestamp - (ref.createdTimestamp || message.createdTimestamp)),
+    };
+  }
+  // Even if the message is gone, the reply mention still says who it was.
+  const user = message.mentions?.repliedUser;
+  if (!user) return null;
+  return {
+    authorName: user.globalName || user.username || "someone",
+    isSelf: user.id === client.user.id,
+    content: "",
+    ageMs: 0,
+  };
+}
+
 // Real human conversation per channel in a time window: human messages from
 // memory.db (bot messages are never logged there), minus game commands.
 function realConversationCounts(sinceMs) {
@@ -274,6 +309,7 @@ client.on(Events.MessageCreate, async (message) => {
   const displayName = message.member?.displayName || message.author.username;
   rememberUserMessage(message.channel.id, displayName, renderedContent);
 
+  const replyTarget = await resolveReplyTarget(message);
   const mentioned = message.mentions.has(client.user);
   const command = parseCommand(message.content, config.prefix);
   if (!mentioned && command === null) {
@@ -284,8 +320,11 @@ client.on(Events.MessageCreate, async (message) => {
 
     await message.channel.sendTyping();
     try {
+      const replyNote = replyTarget
+        ? ` They sent it as a Discord reply to ${replyTarget.isSelf ? "your earlier message" : `${replyTarget.authorName}'s message${replyTarget.content ? ` ("${replyTarget.content}")` : ""}`}.`
+        : "";
       const answer = await askAI({
-        prompt: `Someone in Discord said: "${renderedContent}". React naturally, only if there is a reason to join in. If you would add nothing useful, answer exactly: NO_REPLY.`,
+        prompt: `Someone in Discord said: "${renderedContent}".${replyNote} React naturally, only if there is a reason to join in. If you would add nothing useful, answer exactly: NO_REPLY.`,
         personality: config.personality,
         systemContext: renderAliveness(new Date(), lastSpokeAtRef.value),
       });
@@ -362,6 +401,7 @@ client.on(Events.MessageCreate, async (message) => {
         deepRecall,
         personalityPath: config.personalityPath,
         botId: client.user.id,
+        replyTo: replyTarget,
       });
       const messages = [
         {
