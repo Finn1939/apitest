@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 const personalityPath = process.env.PERSONALITY_PATH || "personality.txt";
 let personality = process.env.BOT_PERSONALITY || "";
 try {
-  personality = readFileSync(personalityPath, "utf8").trim();
+  if (!personality) personality = readFileSync(personalityPath, "utf8").trim();
 } catch (error) {
   if (!personality) throw new Error(`Could not read personality file ${personalityPath}: ${error.message}`);
 }
