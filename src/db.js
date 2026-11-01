@@ -1,5 +1,8 @@
 import Database from "better-sqlite3";
-import { getLoadablePath } from "sqlite-vec";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const { getLoadablePath } = require("sqlite-vec");
 
 export function createMemoryDb(filePath) {
   const db = new Database(filePath);
