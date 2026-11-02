@@ -619,8 +619,15 @@ function isRepeatOfRecent(line, lines) {
   return String(lines || "").toLowerCase().includes(head);
 }
 
-async function judgeChimeInFor(channel, occasion) {
-  const lines = recentChannelLines(channel.id, 8);
+async function judgeChimeInFor(channel, occasion, referenceId) {
+  // Learned game channels log no bot traffic, so the persistent lines the
+  // judgment would read hold no panels — take one live look instead, or it
+  // would weigh a moment it cannot see.
+  let lines = recentChannelLines(channel.id, 8);
+  if (isLearnedGameChannel(channel.id) && !channel.isDMBased?.()) {
+    const live = await fetchLiveChannelLines(channel, referenceId);
+    if (live) lines = live;
+  }
   const verdict = await analyst.judgeChimeIn({
     channelLabel: channel.name || "chat",
     lines,
@@ -1107,23 +1114,38 @@ function maybeWatchGamePanel(message, panelText) {
   }
 }
 
-// Game channels log no bot traffic (Karuta/OwO spam would bury the DB), so
-// when someone talks to her inside one, the game panel they are asking about
-// is not in her persistent memory — this is what produced "decide what? you
-// haven't shown me anything". Instead, at reply time she takes one live look
-// at the channel: the last few messages, bot panels rendered with their
-// buttons, current as of right now. One REST fetch, only on messages already
-// addressed to her; any failure degrades to replying without the snapshot.
-async function fetchGameChannelSnapshot(channel) {
+// Raw live lines from a channel, no preamble — shared by the reply snapshot
+// and the chime-in judgment. When someone used Discord's reply on a specific
+// message, that exact message is merged in even if the channel is too busy
+// for it to still be in the last ten (they are pointing AT it — it must be
+// visible no matter how far up it scrolled).
+async function fetchLiveChannelLines(channel, referenceId) {
   try {
     const recent = await channel.messages.fetch({ limit: 10 });
-    const text = renderChannelSnapshot([...recent.values()], client.user.id);
-    return text
-      ? `Recent messages in this channel (live view — bot messages include their rendered panels and buttons, oldest first):\n${text}`
-      : "";
+    const msgs = [...recent.values()];
+    if (referenceId && !msgs.some((msg) => msg.id === referenceId)) {
+      try {
+        const ref = await channel.messages.fetch(referenceId);
+        if (ref) msgs.push(ref);
+      } catch {
+        // the referenced message may be deleted or too old — the recent ten
+        // still give her the scene
+      }
+    }
+    return renderChannelSnapshot(msgs, client.user.id);
   } catch {
     return "";
   }
+}
+
+// The addressed-reply wrapper: live lines plus the explanatory preamble the
+// reply model reads. One REST fetch, only on messages already addressed to
+// her; any failure degrades to replying without the snapshot.
+async function fetchGameChannelSnapshot(channel, referenceId) {
+  const text = await fetchLiveChannelLines(channel, referenceId);
+  return text
+    ? `Recent messages in this channel (live view — bot messages include their rendered panels and buttons, oldest first):\n${text}`
+    : "";
 }
 
 client.on(Events.MessageCreate, async (message) => {
@@ -1277,7 +1299,7 @@ client.on(Events.MessageCreate, async (message) => {
     if (config.analysisEnabled) {
       try {
         const { verdict, lines } = await judgeChimeInFor(
-          message.channel, "someone just said something she overheard");
+          message.channel, "someone just said something she overheard", message.reference?.messageId);
         if (verdict) {
           if (verdict.speak && verdict.line && !isRepeatOfRecent(verdict.line, lines)) {
             await deliverReply(message, verdict.line, { lastSpokeAtRef, onSent: (sent) => trackSentMessage(sent, verdict.line) });
@@ -1338,8 +1360,21 @@ client.on(Events.MessageCreate, async (message) => {
     ? renderDiscordMentions(command, mentionLookups).trim()
     : renderDiscordMentions(stripped, mentionLookups).trim();
   if (!prompt) {
-    await message.reply("Hey! What do you want to talk about?");
-    return;
+    // A bare @-mention used to always get the canned line — even when they
+    // were pointing straight at something: a Discord reply aimed at a game
+    // panel with no words ("@teacher-san" while replying to OwO's card), or
+    // an @-mention holding up an attachment. She answered "Hey! What do you
+    // want to talk about?" while the fully rendered panel sat unused in the
+    // already-resolved reply target — that read as "she can't see it". If
+    // there is anything to look at, fall through to the memory-rich reply:
+    // the thing they pointed at IS the message.
+    const pointingAtSomething = Boolean(replyTarget?.content)
+      || Boolean(mediaExtras)
+      || Boolean(message.attachments?.size);
+    if (!pointingAtSomething) {
+      await message.reply("Hey! What do you want to talk about?");
+      return;
+    }
   }
 
   await message.channel.sendTyping();
@@ -1398,10 +1433,12 @@ client.on(Events.MessageCreate, async (message) => {
       }
       const promptWithMedia = `${prompt}${mediaExtras ? ` ${mediaExtras}` : ""}`.trim();
       let embedVector = null;
-      try {
-        embedVector = await embedText(promptWithMedia);
-      } catch {
-        // FTS-only retrieval still works if the local embedder fails.
+      if (promptWithMedia) {
+        try {
+          embedVector = await embedText(promptWithMedia);
+        } catch {
+          // FTS-only retrieval still works if the local embedder fails.
+        }
       }
       // "here @OwO" / "this" aimed at another bot is a pointer, not a command:
       // they are holding up that bot's message for her to look at.
@@ -1414,14 +1451,29 @@ client.on(Events.MessageCreate, async (message) => {
       const reactionsSeen = recentReactionSummary(message.channel.id);
       // Learned game channels log no bot panels, and in any channel a fresh
       // panel can be pushed out of the persistent transcript window fast — so
-      // when someone talks to her where a bot spoke in the last five minutes
-      // (or in a learned game channel, whenever), take one live look at the
-      // channel: this is how she actually sees the HighLow card someone wants
-      // help deciding on, instead of "you haven't shown me anything".
+      // take one live look at the channel whenever a bot was part of the scene
+      // by ANY source. The in-memory map is wiped by every restart (that is,
+      // every deploy), so the log check keeps the live look working right
+      // after a redeploy; and when they used Discord's reply, the exact
+      // message they pointed at is merged into the snapshot no matter how far
+      // up it scrolled. This is how she actually sees the HighLow card someone
+      // wants help deciding on, instead of "you haven't shown me anything".
       const otherBotRecent = Date.now() - (otherBotMessageAtByChannel.get(message.channel.id) || 0) <= 5 * 60_000;
+      let loggedBotRecent = false;
+      try {
+        const lastOtherBotRow = memoryDb.prepare(
+          "SELECT created_at FROM messages WHERE channel_id = ? AND is_bot = 1 AND author_id != ? ORDER BY id DESC LIMIT 1",
+        ).get(message.channel.id, client.user.id);
+        loggedBotRecent = lastOtherBotRow
+          ? Date.now() - lastOtherBotRow.created_at <= 10 * 60_000
+          : false;
+      } catch {
+        loggedBotRecent = false;
+      }
+      const pointedWithReply = Boolean(message.reference?.messageId);
       const gameSnapshot = !message.channel.isDMBased?.()
-        && (isLearnedGameChannel(message.channel.id) || otherBotRecent)
-        ? await fetchGameChannelSnapshot(message.channel)
+        && (isLearnedGameChannel(message.channel.id) || otherBotRecent || loggedBotRecent || pointedWithReply)
+        ? await fetchGameChannelSnapshot(message.channel, message.reference?.messageId)
         : "";
       const persistentContext = buildContext(memoryDb, {
         message: {
@@ -1457,7 +1509,14 @@ client.on(Events.MessageCreate, async (message) => {
               : []),
           ].filter(Boolean).join("\n"),
         },
-        { role: "user", content: visionUserContent(promptWithMedia, visionImages) },
+        // A bare @-mention that fell through above must not become an empty
+        // user turn — the floor note sends the model to what they pointed at
+        // (the reply target and any attachment are already in the context).
+        { role: "user", content: visionUserContent(
+          promptWithMedia
+            || "(no text — they only tagged you. Look at the message they replied to and any attachment, then respond.)",
+          visionImages,
+        ) },
       ];
       const lastOwnReply = lastAssistantReply(message.channel.id);
       let streamedSentId = null;
@@ -1496,5 +1555,14 @@ client.on(Events.MessageCreate, async (message) => {
     await message.reply("My brain tripped for a second. Please try again.");
   }
 });
+
+// Verifiable deploys: the zip ships commit-hash.txt, so "am I actually
+// running the latest build?" is answerable from the host logs in one glance.
+try {
+  const buildHash = readFileSync(new URL("../commit-hash.txt", import.meta.url), "utf8").trim();
+  if (buildHash) console.log(`[teacher-san] running build ${buildHash.slice(0, 12)}`);
+} catch {
+  // No hash file (dev checkout) — nothing to report.
+}
 
 client.login(config.discordToken);

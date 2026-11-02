@@ -38,7 +38,20 @@ readable text in her memory, so "can you help me decide?" gets a real answer
 about the actual card and payouts. A short pointer like "here @OwO" is
 understood as showing her that bot's message above, not as a command for that
 bot. HighLow-style commands (`whl`, `hl`, `highlow`) are treated as game
-traffic and never answered as conversation.
+traffic and never answered as conversation. A bare `@teacher-san` with no
+text is not an empty ping when it points at something: if it was sent as a
+Discord reply to a message (a game panel) or carries an attachment, she
+answers about the thing they are holding up — the reply target and any
+attachment are the message. When she is about to reply where a bot was part
+of the scene, she also takes one live look at the channel (last ten messages,
+panels and buttons rendered); the live look triggers from any source — a
+learned game channel, a bot message in the last five minutes, a bot message
+in her log in the last ten minutes (this one survives restarts, so a fresh
+deploy does not blind her), or a Discord reply aimed at a specific message,
+which is merged into the snapshot no matter how far up the channel it
+scrolled. On startup the bot prints `[teacher-san] running build <hash>` from
+the shipped `commit-hash.txt`, so the running build is verifiable from the
+host logs in one glance.
 
 She sees the whole conversation, not just plain text:
 
