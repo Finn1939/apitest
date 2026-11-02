@@ -57,7 +57,59 @@ test("renderEmbeds caps length and skips empty input", () => {
   assert.equal(renderEmbeds(null), "");
   assert.equal(renderEmbeds([{ title: "", description: "", fields: [] }]), "");
   const long = renderEmbeds([{ description: "x".repeat(500) }], { maxLength: 100 });
-  assert.ok(long.length <= 102, "embed text must be capped");
+  // Capped = prefix + at most maxLength characters of embed text + closing
+  // bracket. The bound is computed from the live prefix so the test survives
+  // prefix rewording.
+  const prefix = "[Discord Embed: ";
+  assert.ok(long.length <= prefix.length + 100 + 1, "embed text must be capped");
+  assert.ok(long.startsWith(prefix) && long.endsWith("]"), "still one bracketed line");
+});
+
+test("renderEmbeds surfaces the full link-preview shape", () => {
+  // A link preview Discord attaches to a HUMAN message: site name, title,
+  // description, media URLs, footer, timestamp — everything the expanded
+  // reader promises.
+  const out = renderEmbeds([{
+    author: { name: "YouTube" },
+    title: "Building a Discord bot",
+    url: "https://youtube.com/watch?v=abc",
+    description: "Full guide, 12 minutes.",
+    thumbnail: { url: "https://i.ytimg.com/vi/abc/hq720.jpg" },
+    image: { url: "https://i.ytimg.com/vi/abc/maxres.jpg" },
+    video: { url: "https://youtube.com/embed/abc" },
+    footer: { text: "Watch later" },
+    timestamp: "2026-10-28T18:00:00.000Z",
+  }]);
+  assert.ok(out.startsWith("[Discord Embed: "), "clearly labeled as an embed");
+  assert.match(out, /YouTube/);
+  assert.match(out, /Building a Discord bot/);
+  assert.match(out, /URL: https:\/\/youtube\.com\/watch\?v=abc/);
+  assert.match(out, /Full guide, 12 minutes\./);
+  assert.match(out, /\[Image: https:\/\/i\.ytimg\.com\/vi\/abc\/maxres\.jpg\]/);
+  assert.match(out, /\[Thumbnail: https:\/\/i\.ytimg\.com\/vi\/abc\/hq720\.jpg\]/);
+  assert.match(out, /\[Video: https:\/\/youtube\.com\/embed\/abc\]/);
+  assert.match(out, /Watch later/);
+  assert.match(out, /Timestamp: /);
+});
+
+test("renderEmbeds renders every embed, not just the first two", () => {
+  const embeds = [1, 2, 3, 4].map((n) => ({ title: `Panel ${n}` }));
+  const out = renderEmbeds(embeds);
+  assert.match(out, /Panel 1/);
+  assert.match(out, /Panel 4/); // the old two-embed cap would have dropped this
+});
+
+test("channel snapshot renders link previews on human messages", () => {
+  const out = renderChannelSnapshot([{
+    createdTimestamp: 1,
+    author: { id: "5", bot: false, username: "sprite" },
+    member: { displayName: "sprite vodka" },
+    content: "yo check this out https://youtube.com/watch?v=abc",
+    embeds: [{ author: { name: "YouTube" }, title: "Building a Discord bot", description: "Full guide." }],
+  }], "42");
+  assert.ok(out.includes("sprite vodka:"), "the human line is there");
+  assert.ok(out.includes("[Discord Embed:"), "the preview rides along");
+  assert.ok(out.includes("Building a Discord bot"), "and carries its title");
 });
 
 test("renders button labels from bot panels", () => {

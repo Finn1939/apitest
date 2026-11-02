@@ -985,19 +985,25 @@ client.on(Events.MessageUpdate, async (_oldMessage, incoming) => {
       roles: edited.mentions?.roles,
       channels: edited.mentions?.channels,
     };
-    const panelText = isOtherBot
-      ? [renderEmbeds(edited.embeds), renderButtons(edited.components)].filter(Boolean).join(" ")
-      : "";
+    // Bot panels: re-render on edit (the HighLow card changed). Human
+    // messages: compose exactly like create-time — an edit must not silently
+    // drop the link preview that was logged when the message arrived, and a
+    // late-unfurled preview (Discord delivers it through this event after the
+    // site finally responded) lands here too.
+    const extras = [
+      renderEmbeds(edited.embeds),
+      renderButtons(edited.components),
+      isOtherBot ? "" : renderMediaExtras(edited),
+    ].filter(Boolean).join(" ");
     const text = [
       renderDiscordMentions(edited.content || "", mentionLookups),
-      panelText,
-      isOtherBot ? "" : renderMediaExtras(edited),
+      extras,
     ].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
     if (!text) return;
     // Game panels churn silently; human edits carry the (edited) marker — the
     // same way Discord shows it — so she can tease "saw you edit that, nya".
     updateMessageContentByDiscordId(memoryDb, edited.id,
-      `${text.slice(0, 400)}${isOtherBot ? "" : " (edited)"}`);
+      `${text.slice(0, isOtherBot ? 400 : 2000)}${isOtherBot ? "" : " (edited)"}`);
   } catch (error) {
     console.warn("Edit tracking failed:", error.message);
   }
@@ -1212,11 +1218,21 @@ client.on(Events.MessageCreate, async (message) => {
     channels: message.mentions.channels,
   };
   const renderedContent = renderDiscordMentions(message.content, mentionLookups);
+  // Embeds and buttons on a HUMAN message: when someone posts a link, Discord
+  // attaches the preview (site name, title, description, media URLs) as an
+  // embed on that message — without this it was invisible, so "check this out
+  // <link>" was stored and sent to the model as bare text with a URL. Buttons
+  // are normally empty for humans (Discord only lets apps attach components);
+  // rendered anyway so the human path can never silently drop what the bot
+  // path renders.
+  const embedExtras = renderEmbeds(message.embeds, { maxLength: 1500 });
+  const buttonExtras = renderButtons(message.components);
   // Media awareness: attachments, stickers and polls become readable notes, so
   // "look at this [attached: meme.png (image, 512 KB, 800×600)]" is a real
   // conversation even when she cannot watch a video or listen to a voice clip.
   const mediaExtras = renderMediaExtras(message);
-  const loggedContent = `${renderedContent}${mediaExtras ? ` ${mediaExtras}` : ""}`.trim();
+  const loggedContent = [renderedContent, embedExtras, buttonExtras, mediaExtras]
+    .filter(Boolean).join(" ").trim();
 
   const loggedId = logMessage(memoryDb, {
     channelId: message.channel.id,
@@ -1431,7 +1447,13 @@ client.on(Events.MessageCreate, async (message) => {
           // A failed download must never block the text reply.
         }
       }
-      const promptWithMedia = `${prompt}${mediaExtras ? ` ${mediaExtras}` : ""}`.trim();
+      // What the model receives for THIS message: the text plus everything
+      // attached to it — the link preview embed, panel buttons, and
+      // attachment/sticker/poll notes. The same string drives semantic
+      // embedding and FTS retrieval, so link content becomes searchable
+      // memory too.
+      const promptWithMedia = [prompt, embedExtras, buttonExtras, mediaExtras]
+        .filter(Boolean).join(" ").trim();
       let embedVector = null;
       if (promptWithMedia) {
         try {

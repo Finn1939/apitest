@@ -35,7 +35,12 @@ Karuta are left alone; she never starts conversations there.
 Game-bot panels are visible to her: when another bot answers with embeds and
 buttons (OwO's HighLow card, for example), the panel is flattened into
 readable text in her memory, so "can you help me decide?" gets a real answer
-about the actual card and payouts. A short pointer like "here @OwO" is
+about the actual card and payouts. The same flattening covers human messages:
+when someone posts a link, Discord attaches the preview (site name, title,
+description, fields, media URLs, footer) as an embed on their message, and it
+is stored in memory and passed to the model together with the message — so
+"check this out <link>" tells her what the link is about without opening it.
+A short pointer like "here @OwO" is
 understood as showing her that bot's message above, not as a command for that
 bot. HighLow-style commands (`whl`, `hl`, `highlow`) are treated as game
 traffic and never answered as conversation. A bare `@teacher-san` with no
@@ -55,6 +60,13 @@ host logs in one glance.
 
 She sees the whole conversation, not just plain text:
 
+- **Link previews** — when someone posts a link, the preview embed Discord
+  attaches to their message (site, title, description, media URLs) is
+  rendered into her memory and the reply context. Reading a media URL is
+  metadata, not vision: she knows an image or video is there without seeing
+  it — only attached photos go through the vision path. If a site unfurls
+  late, the preview arrives through the edit event and lands the same way,
+  and editing a message never drops the preview that was already stored.
 - **Images** — when someone sends her a photo while talking to her, she
   actually looks at it (the model is vision-language capable). Photos are
   downscaled locally with sharp before being sent, so payloads stay small and

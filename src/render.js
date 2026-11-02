@@ -22,26 +22,40 @@ export function renderDiscordMentions(content, { users, roles, channels } = {}) 
     });
 }
 
-// Game bots (OwO, Karuta, gambling bots) put their whole message in EMBEDS —
-// OwO's HighLow panel has an empty message.content. Without rendering them,
-// she was blind to the game the user was asking her to help decide on. Flattens
-// title/description/fields/footer of up to two embeds into one bracketed line.
-export function renderEmbeds(embeds, { maxLength = 280 } = {}) {
+// Embeds are how Discord carries structured content: game bots put their
+// whole message in them (OwO's HighLow panel has an empty message.content),
+// and when a HUMAN posts a link, Discord attaches the link preview — site
+// name, title, description, media URLs — as an embed on their message.
+// Flattens every embed (no count limit; the total is capped) into one
+// bracketed, clearly-labeled line. Image/thumbnail/video URLs are metadata:
+// she knows they are there, she does not see them (only attached photos go
+// through the vision path).
+export function renderEmbeds(embeds, { maxLength = 1500 } = {}) {
   if (!Array.isArray(embeds)) return "";
+
   const parts = [];
-  for (const embed of embeds.slice(0, 2)) {
+  for (const embed of embeds) {
     if (!embed) continue;
-    const fields = Array.isArray(embed.fields) ? embed.fields : [];
+
     const bits = [
+      embed.author?.name,
       embed.title,
+      embed.url ? `URL: ${embed.url}` : "",
       embed.description,
-      ...fields.map((field) => [field?.name, field?.value].filter(Boolean).join(": ")),
+      ...(Array.isArray(embed.fields) ? embed.fields : []).map((field) =>
+        [field?.name, field?.value].filter(Boolean).join(": ")),
+      embed.image?.url ? `[Image: ${embed.image.url}]` : "",
+      embed.thumbnail?.url ? `[Thumbnail: ${embed.thumbnail.url}]` : "",
+      embed.video?.url ? `[Video: ${embed.video.url}]` : "",
       embed.footer?.text,
-    ].filter((text) => typeof text === "string" && text.trim());
+      embed.timestamp ? `Timestamp: ${embed.timestamp}` : "",
+    ].filter(Boolean);
+
     if (bits.length) parts.push(bits.join(" | "));
   }
+
   const text = parts.join(" || ").replace(/\s+/g, " ").trim().slice(0, maxLength);
-  return text ? `[${text}]` : "";
+  return text ? `[Discord Embed: ${text}]` : "";
 }
 
 // The clickable choices on a bot panel (HighLow's Higher/Lower/Same/Cash Out)
