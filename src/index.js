@@ -1546,7 +1546,14 @@ client.on(Events.MessageCreate, async (message) => {
       ];
       const lastOwnReply = lastAssistantReply(message.channel.id);
       let streamedSentId = null;
-      answer = await deliverStreamedReply(message, (onDelta) => streamReply({ messages, onDelta }), {
+      answer = await deliverStreamedReply(message, (onDelta) => streamReply({
+        messages,
+        onDelta,
+        // Photos make the model reason heavily about the image; the default
+        // budget can be eaten by thinking alone (the answer never starts —
+        // "empty stream"). Give vision attempts room from the first try.
+        ...(visionImages.length ? { maxTokens: Math.max(config.replyMaxTokens, 2048) } : {}),
+      }), {
         lastSpokeAtRef,
         // Tracked from the first moment the message exists (reactions during
         // streaming count); the real text is filled in below once the stream

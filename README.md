@@ -100,7 +100,14 @@ none of which touch her personality:
   reaches Discord, and reasoning delivered in a separate protocol field is
   ignored entirely. While she thinks, the channel just sees her typing.
   Reasoning also consumes part of the token budget, so `REPLY_MAX_TOKENS`
-  defaults to 1024 instead of 512.
+  defaults to 1024 instead of 512, and photo replies start at 2048 (reading
+  an image is reasoning-heavy). If a stream ever finishes with nothing
+  user-visible — the model spent its whole budget thinking — it retries
+  automatically: once with a doubled budget, then with thinking off so the
+  model must answer directly. Only if all three attempts come back empty does
+  she fall back to the "brain tripped" message. Short replies ("ok", "lol")
+  are released from the reasoning filter when the stream ends, so they are
+  delivered instead of looking like an empty stream.
 - **Grounded sampling** — `REPLY_TEMPERATURE` defaults to 0.7 instead of 1.0:
   the same character, but she stops scattering. Raise it back toward 1.0 if
   she ever feels too dry.
