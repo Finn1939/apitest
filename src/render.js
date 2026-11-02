@@ -114,6 +114,39 @@ export function renderMediaExtras(message) {
   return parts.join(" ");
 }
 
+// A live snapshot of a channel's last messages — the view she gets when
+// someone talks to her inside a bot-game channel. Learned game channels log
+// no bot traffic (Karuta/OwO spam would bury the DB), so the panel someone
+// is asking about is NOT in her persistent memory; this snapshot fetched at
+// reply time is the only place she sees it. Bot messages include their
+// rendered embeds and buttons (the HighLow card, cash-out values), her own
+// messages are skipped (already in her context), mentions become names.
+export function renderChannelSnapshot(messages, selfId) {
+  return [...(messages || [])]
+    .filter(Boolean)
+    .sort((a, b) => (a.createdTimestamp || 0) - (b.createdTimestamp || 0))
+    .map((msg) => {
+      if (!msg.author || msg.author.id === selfId) return null;
+      const content = renderDiscordMentions(msg.content || "", {
+        users: msg.mentions?.users,
+        roles: msg.mentions?.roles,
+        channels: msg.mentions?.channels,
+      });
+      const panel = [
+        renderEmbeds(msg.embeds || []),
+        renderButtons(msg.components || []),
+        renderMediaExtras(msg),
+      ].filter(Boolean).join(" ");
+      const text = `${content}${panel ? ` ${panel}` : ""}`.replace(/\s+/g, " ").trim();
+      if (!text) return null;
+      const who = msg.author.bot
+        ? `${msg.author.displayName || msg.author.username || "bot"} [bot]`
+        : (msg.member?.displayName || msg.author.displayName || msg.author.username || "someone");
+      return `${who}: ${text.slice(0, 320)}`;
+    })
+    .filter(Boolean).join("\n");
+}
+
 // Vision: when someone sends her an image while talking to her, the user turn
 // becomes a multimodal content array. Without images it stays a plain string,
 // so nothing changes for text-only messages.

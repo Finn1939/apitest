@@ -96,6 +96,14 @@ Beyond composing replies, the same model makes small structured judgments
   judgment falls back to the old behavior. Unprompted appearances now feel
   earned instead of random, and a judgment-approved line skips the big
   reply call entirely.
+Inside bot-game channels two extra rules apply. Bot panels are deliberately
+not logged there (game-bot spam would bury the memory), so when someone
+talks to her in one she takes one live look at the channel first — the last
+few messages fetched fresh, embeds and buttons rendered — which is how she
+sees the HighLow card someone wants help deciding on. And conversation
+engagement carries inside game channels too, with an 8-character noise
+floor so win/loss chatter ("W", "lol") never drags her in but real
+follow-ups keep the conversation going without re-mentioning her.
 
 Judgment calls share the 3-key pool with replies but have their own sliding
 budget (default 10 calls/min — about 8% of 120 RPM), so live replies always

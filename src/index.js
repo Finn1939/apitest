@@ -22,7 +22,7 @@ import { createMemoryDb } from "./db.js";
 import { createJobs, embedText } from "./jobs.js";
 import { streamReply } from "./llm.js";
 import { deliverReply, deliverStreamedReply, renderAliveness } from "./aliveness.js";
-import { renderDiscordMentions, renderEmbeds, renderButtons, renderMediaExtras, visionUserContent } from "./render.js";
+import { renderChannelSnapshot, renderDiscordMentions, renderEmbeds, renderButtons, renderMediaExtras, visionUserContent } from "./render.js";
 import { createAnalyst } from "./analysis.js";
 import { detectIntimacy, formatReactionSummary, isAddressedToBot, isDuplicateReply, isGameCommand, isPointingAtBot, isReplyIdentityQuestion, learnedGameCommands, pickIdentityAnswer, shouldResolveReplyTarget, SPONTANEOUS_OPENERS } from "./replies.js";
 
@@ -54,6 +54,13 @@ const storedMemory = loadMemory();
 const conversations = storedMemory.conversations;
 const channelFacts = storedMemory.facts;
 const lastBotMessageAtByChannel = new Map();
+
+// The last time another bot (OwO, Karuta, a music bot) spoke in a channel —
+// the freshness signal for the live channel snapshot: if a bot panel just
+// landed, her reply should see it even in a channel that is not a learned
+// game one yet.
+const otherBotMessageAtByChannel = new Map();
+
 const spontaneousReplies = new Map();
 const botActivityByChannel = new Map();
 const botCommandCountByChannel = new Map();
@@ -1065,10 +1072,17 @@ function maybeWatchGamePanel(message, panelText) {
       const triggerRow = memoryDb.prepare(
         "SELECT content FROM messages WHERE channel_id = ? AND is_bot = 0 ORDER BY id DESC LIMIT 1",
       ).get(channelId);
+      // Learned game channels log no bot traffic, so the panel that triggered
+      // this watch is invisible to recentChannelLines — hand it to the
+      // judgment explicitly, or it would judge a moment it cannot see.
+      const baseLines = recentChannelLines(channelId, 8);
+      const panelLine = `${message.author.displayName || message.author.username} [bot]: ${String(panelText).replace(/\s+/g, " ").trim().slice(0, 400)}`;
       const verdict = await analyst.judgeGameMoment({
         channelLabel: message.channel.name || "game-channel",
         gameBotName: message.author.displayName || message.author.username,
-        lines: recentChannelLines(channelId, 8),
+        lines: isLearnedGameChannel(channelId)
+          ? (baseLines ? `${baseLines}\n${panelLine}` : panelLine)
+          : baseLines,
         triggerCandidate: triggerRow ? String(triggerRow.content).slice(0, 24) : "",
       });
       if (!verdict) return;
@@ -1093,12 +1107,32 @@ function maybeWatchGamePanel(message, panelText) {
   }
 }
 
+// Game channels log no bot traffic (Karuta/OwO spam would bury the DB), so
+// when someone talks to her inside one, the game panel they are asking about
+// is not in her persistent memory — this is what produced "decide what? you
+// haven't shown me anything". Instead, at reply time she takes one live look
+// at the channel: the last few messages, bot panels rendered with their
+// buttons, current as of right now. One REST fetch, only on messages already
+// addressed to her; any failure degrades to replying without the snapshot.
+async function fetchGameChannelSnapshot(channel) {
+  try {
+    const recent = await channel.messages.fetch({ limit: 10 });
+    const text = renderChannelSnapshot([...recent.values()], client.user.id);
+    return text
+      ? `Recent messages in this channel (live view — bot messages include their rendered panels and buttons, oldest first):\n${text}`
+      : "";
+  } catch {
+    return "";
+  }
+}
+
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) {
     botActivityByChannel.set(message.channel.id, (botActivityByChannel.get(message.channel.id) || 0) + 1);
     // Her own messages are logged at delivery time (rememberOwnMessage, with
     // the full reply text) — the gateway echo must not double-log them.
     if (message.author.id !== client.user.id) {
+      otherBotMessageAtByChannel.set(message.channel.id, Date.now());
       // Log other bots' messages (truncated, never in learned game channels) so
       // she knows who TEST./OwO/Karuta are when someone asks "who is dis?".
       // Game panels live in embeds and buttons, not content — render them so she
@@ -1198,8 +1232,18 @@ client.on(Events.MessageCreate, async (message) => {
   const replyingToAnotherBot = !mentioned
     && Boolean(repliedUser?.bot)
     && repliedUser.id !== client.user.id;
-  // In a DM, every message is talking to her.
-  const engaged = inDm || (!gameCommand && !replyingToAnotherBot && !isLearnedGameChannel(message.channel.id)
+  // In a DM, every message is talking to her. Engagement now also carries
+  // inside bot-game channels — that is where people hold whole conversations
+  // with her around the games — but only for follow-ups that are real
+  // conversation: not commands, not replies to other bots, and at least 8
+  // characters, the same noise floor as the spontaneous path, so game-channel
+  // chatter like "W" or "lol" never drags her in.
+  const gameChannelFollowUp = isLearnedGameChannel(message.channel.id)
+    && !gameCommand && !replyingToAnotherBot
+    && message.content.trim().length >= 8;
+  const engagementEligible = !gameCommand && !replyingToAnotherBot
+    && (!isLearnedGameChannel(message.channel.id) || gameChannelFollowUp);
+  const engaged = inDm || (engagementEligible
     ? isEngaged(message.channel.id, message.author.id)
     : false);
   const command = parseCommand(message.content, config.prefix);
@@ -1368,6 +1412,17 @@ client.on(Events.MessageCreate, async (message) => {
         ? (mentionedOtherBot.displayName || mentionedOtherBot.globalName || mentionedOtherBot.username)
         : null;
       const reactionsSeen = recentReactionSummary(message.channel.id);
+      // Learned game channels log no bot panels, and in any channel a fresh
+      // panel can be pushed out of the persistent transcript window fast — so
+      // when someone talks to her where a bot spoke in the last five minutes
+      // (or in a learned game channel, whenever), take one live look at the
+      // channel: this is how she actually sees the HighLow card someone wants
+      // help deciding on, instead of "you haven't shown me anything".
+      const otherBotRecent = Date.now() - (otherBotMessageAtByChannel.get(message.channel.id) || 0) <= 5 * 60_000;
+      const gameSnapshot = !message.channel.isDMBased?.()
+        && (isLearnedGameChannel(message.channel.id) || otherBotRecent)
+        ? await fetchGameChannelSnapshot(message.channel)
+        : "";
       const persistentContext = buildContext(memoryDb, {
         message: {
           channelId: message.channel.id,
@@ -1396,6 +1451,7 @@ client.on(Events.MessageCreate, async (message) => {
             renderAliveness(new Date(), lastSpokeAtRef.value),
             factsContextText,
             persistentContext.memoryBlock,
+            ...(gameSnapshot ? [gameSnapshot] : []),
             ...(visionImages.length
               ? ["This message includes attached image(s) and you can actually see them. Look at them properly: mention what you concretely notice — people, animals, text, places, the vibe — like a friend who actually opened the photo, not someone guessing from the filename. Describe what stands out; that description is how you'll remember the image later."]
               : []),

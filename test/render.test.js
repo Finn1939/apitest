@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { renderAttachments, renderButtons, renderDiscordMentions, renderEmbeds, renderMediaExtras, renderPoll, renderStickers, visionUserContent } from "../src/render.js";
+import { renderAttachments, renderButtons, renderChannelSnapshot, renderDiscordMentions, renderEmbeds, renderMediaExtras, renderPoll, renderStickers, visionUserContent } from "../src/render.js";
 
 test("renders user, role, and channel mentions into readable names", () => {
   const users = new Map([["111", { displayName: "Jake", globalName: "Jake", username: "jakey" }]]);
@@ -145,4 +145,52 @@ test("visionUserContent passes through text and builds multimodal arrays", () =>
   assert.deepEqual(content[0], { type: "text", text: "look at this" });
   assert.deepEqual(content[1], { type: "image_url", image_url: { url: "data:image/jpeg;base64,AAA" } });
   assert.deepEqual(content[2], { type: "image_url", image_url: { url: "data:image/jpeg;base64,BBB" } });
+});
+
+test("channel snapshot shows bot game panels with buttons, skips her own messages", () => {
+  // The exact screenshot scenario: OwO's HighLow panel, then someone asking
+  // her for help — plus one of her own earlier replies that must not appear.
+  const selfId = "42";
+  const owoEmbed = {
+    title: "HighLow",
+    description: "Current card: 9 of diamonds",
+    fields: [{ name: "Higher", value: "+2,325" }, { name: "Lower", value: "+597" }],
+  };
+  const messages = [
+    {
+      createdTimestamp: 3000,
+      author: { id: selfId, bot: true, username: "teacher-san" },
+      content: "go all in, trust me",
+    },
+    {
+      createdTimestamp: 1000,
+      author: { id: "1", bot: true, displayName: "OwO", username: "owo" },
+      content: "",
+      embeds: [owoEmbed],
+      components: [{ components: [{ label: "Higher (+2,325)" }, { label: "Cash Out: 1,131" }] }],
+    },
+    {
+      createdTimestamp: 2000,
+      author: { id: "2", bot: false, displayName: "sprite vodka", username: "sprite_vodka" },
+      member: { displayName: "sprite vodka" },
+      content: "<@42> help me decide",
+      mentions: { users: new Map([[selfId, { displayName: "teacher-san", username: "teacher_san" }]]) },
+    },
+  ];
+  const out = renderChannelSnapshot(messages, selfId);
+  const lines = out.split("\n");
+  // Oldest first, her own message dropped.
+  assert.equal(lines.length, 2);
+  assert.ok(lines[0].startsWith("OwO [bot]:"));
+  assert.ok(lines[0].includes("HighLow"));
+  assert.ok(lines[0].includes("Higher (+2,325)")); // buttons rendered too
+  assert.ok(lines[1].startsWith("sprite vodka:"));
+  assert.ok(lines[1].includes("@teacher-san help me decide")); // mention → name
+  assert.ok(!out.includes("go all in")); // her own messages never duplicated
+});
+
+test("channel snapshot handles empty channels and message-shaped junk", () => {
+  assert.equal(renderChannelSnapshot([], "1"), "");
+  assert.equal(renderChannelSnapshot(null, "1"), "");
+  assert.equal(renderChannelSnapshot([null, { author: null }, { author: { id: "9" }, content: "   " }], "1"), "");
 });
