@@ -23,6 +23,7 @@ import { createJobs, embedText } from "./jobs.js";
 import { streamReply } from "./llm.js";
 import { deliverReply, deliverStreamedReply, renderAliveness } from "./aliveness.js";
 import { renderChannelSnapshot, renderDiscordMentions, renderEmbeds, renderButtons, renderMediaExtras, visionUserContent } from "./render.js";
+import { collectVisionImages, VISION_UNAVAILABLE_NOTE } from "./vision.js";
 import { createAnalyst } from "./analysis.js";
 import { detectIntimacy, formatReactionSummary, CONTEXT_GROUNDING, isAddressedToBot, isDuplicateReply, isGameCommand, isPointingAtBot, isReplyIdentityQuestion, learnedGameCommands, pickIdentityAnswer, shouldResolveReplyTarget, SPONTANEOUS_OPENERS } from "./replies.js";
 
@@ -95,56 +96,12 @@ function persistMemory() {
 
 // --- Vision -------------------------------------------------------------------
 // The model is vision-language capable, so when someone sends her an image
-// while talking to her, she actually looks at it. sharp (bundled with the
-// transformers dependency) downscales photos to a small JPEG — a 4 MB phone
-// photo becomes ~150 KB, keeping payloads tiny and memory flat. If sharp is
-// unavailable, only small originals pass through.
-let sharpModule = null;
-try {
-  sharpModule = (await import("sharp")).default;
-} catch {
-  // Optional: text and metadata still work without vision downscaling.
-}
-
-const VISION_MAX_IMAGES = 2;
-const VISION_MAX_BYTES = 8 * 1024 * 1024;
-
-async function toDataUrl(buffer, contentType) {
-  if (sharpModule) {
-    const out = await sharpModule(buffer)
-      .rotate() // respect EXIF orientation
-      .resize(1024, 1024, { fit: "inside", withoutEnlargement: true })
-      .jpeg({ quality: 80 })
-      .toBuffer();
-    return `data:image/jpeg;base64,${out.toString("base64")}`;
-  }
-  if (buffer.length <= 2 * 1024 * 1024) {
-    return `data:${contentType};base64,${buffer.toString("base64")}`;
-  }
-  return null;
-}
-
-// Only images from people actually talking to her are fetched — never from
-// bot spam, never from passive channel traffic. Same request count as a
-// normal reply; the images ride along inside it.
-async function collectVisionImages(message) {
-  const images = [];
-  for (const attachment of message.attachments.values()) {
-    if (images.length >= VISION_MAX_IMAGES) break;
-    const type = String(attachment.contentType || "");
-    if (!type.startsWith("image/")) continue;
-    if (attachment.size > VISION_MAX_BYTES) continue;
-    try {
-      const response = await fetch(attachment.url);
-      if (!response.ok) continue;
-      const dataUrl = await toDataUrl(Buffer.from(await response.arrayBuffer()), type);
-      if (dataUrl) images.push(dataUrl);
-    } catch (error) {
-      console.warn("Could not load an image for vision:", error.message);
-    }
-  }
-  return images;
-}
+// while talking to her, she actually looks at it. The pipeline lives in
+// ./vision.js: small images go inline as base64, large ones are downscaled
+// by Discord's media proxy (no native dependencies — the host never runs
+// npm install, so sharp cannot be assumed), and every drop is logged.
+// collectVisionImages, VISION_UNAVAILABLE_NOTE and hasSharp are re-exported
+// from there.
 
 // --- Reactions on her messages ------------------------------------------------
 // Reaction events carry only ids, so her recent sent messages are tracked
@@ -1447,6 +1404,13 @@ client.on(Events.MessageCreate, async (message) => {
           // A failed download must never block the text reply.
         }
       }
+      // They attached an image but none could be loaded for the model (too
+      // large, unsupported, CDN failure). She must say so honestly instead
+      // of "I don't see an attached image — which one do you mean?" while
+      // the attachment note sits right there in her context.
+      const imageAttachmentsFailed = visionImages.length === 0
+        && [...(message.attachments?.values?.() || [])]
+          .some((attachment) => String(attachment.contentType || "").startsWith("image/"));
       // What the model receives for THIS message: the text plus everything
       // attached to it — the link preview embed, panel buttons, and
       // attachment/sticker/poll notes. The same string drives semantic
@@ -1529,6 +1493,7 @@ client.on(Events.MessageCreate, async (message) => {
             ...(visionImages.length
               ? ["This message includes attached image(s) and you can actually see them. Look at them properly: mention what you concretely notice — people, animals, text, places, the vibe — like a friend who actually opened the photo, not someone guessing from the filename. Describe what stands out; that description is how you'll remember the image later."]
               : []),
+            ...(imageAttachmentsFailed ? [VISION_UNAVAILABLE_NOTE] : []),
             // Grounding goes LAST, right before the user turn: models weight the
             // end of the context most, and these rules are what make her read
             // the panel/preview/memory she was handed instead of guessing.

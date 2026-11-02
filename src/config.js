@@ -54,6 +54,11 @@ export const config = {
   replyThinking: process.env.REPLY_THINKING !== "false",
   replyTemperature: Math.min(2, Math.max(0, Number(process.env.REPLY_TEMPERATURE || 0.7))),
   replyMaxTokens: Math.max(256, Number(process.env.REPLY_MAX_TOKENS || 1024)),
+  // How images reach the model: "base64" (default) embeds them in the request;
+  // "url" hands Discord's public CDN link to the API and lets it download the
+  // image itself (zero local bandwidth — flip to it if the model ever claims
+  // it cannot see images that were sent inline).
+  visionTransport: String(process.env.VISION_TRANSPORT || "base64").toLowerCase() === "url" ? "url" : "base64",
 };
 
 export function validateConfig() {

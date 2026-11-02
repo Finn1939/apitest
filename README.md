@@ -68,10 +68,16 @@ She sees the whole conversation, not just plain text:
   late, the preview arrives through the edit event and lands the same way,
   and editing a message never drops the preview that was already stored.
 - **Images** — when someone sends her a photo while talking to her, she
-  actually looks at it (the model is vision-language capable). Photos are
-  downscaled locally with sharp before being sent, so payloads stay small and
-  it costs no extra API request. Her description of the image is stored as
-  part of the conversation, which is how she remembers what she saw.
+  actually looks at it (the model is vision-language capable). Small images
+  are inlined as base64; large ones (most phone photos) are downscaled by
+  Discord's own media proxy — no native image library needed, so it works
+  on hosts that never run `npm install`. If sharp happens to be installed
+  it is used instead (EXIF-aware, best quality). It costs no extra API
+  request. Her description of the image is stored as part of the
+  conversation, which is how she remembers what she saw. If an image cannot
+  be loaded at all, she says so honestly instead of pretending — and the
+  console says exactly why. `VISION_TRANSPORT=url` switches to handing the
+  API Discord's CDN link directly instead of embedding the bytes.
 - **Attachments, stickers, polls** — everything she cannot open (videos,
   voice messages, files) is still recorded as readable metadata:
   `[attached: voice message (audio/ogg, 88 KB, 14s)]`, `[sticker: Sadge]`,
