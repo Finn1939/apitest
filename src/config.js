@@ -47,6 +47,13 @@ export const config = {
   // considered, and the per-channel quiet period after she comments.
   gameWatchChance: Number(process.env.GAME_WATCH_CHANCE || 0.2),
   gameWatchCooldownMs: Math.max(5, Number(process.env.GAME_WATCH_COOLDOWN_MINUTES || 45)) * 60_000,
+  // Reply generation quality knobs. Thinking on = the model reasons privately
+  // before answering (reasoning never reaches Discord); a temperature below 1
+  // trades randomness for groundedness — she stays in character but stops
+  // scattering. Raise REPLY_TEMPERATURE toward 1.0 if she ever feels too dry.
+  replyThinking: process.env.REPLY_THINKING !== "false",
+  replyTemperature: Math.min(2, Math.max(0, Number(process.env.REPLY_TEMPERATURE || 0.7))),
+  replyMaxTokens: Math.max(256, Number(process.env.REPLY_MAX_TOKENS || 1024)),
 };
 
 export function validateConfig() {

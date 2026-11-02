@@ -122,6 +122,22 @@ export const SPONTANEOUS_OPENERS = [
   "Drop one random thought or tiny hot take and see who bites.",
 ];
 
+// Grounding rules for her replies: HOW to use the context she was handed.
+// She used to be handed a game panel, a link preview and three layers of
+// memory — and still answer "which one?" or "you haven't shown me anything",
+// because nothing told her to READ what was in front of her before speaking.
+// Appended as the LAST block of the system prompt, right before the user
+// turn: models weight the end of the context most, so this is the position
+// that actually changes behavior. Personality is untouched — this is about
+// attention, not character.
+export const CONTEXT_GROUNDING = [
+  "Before answering, ground yourself in what you were just given, in this order:",
+  "1. If they replied to or pointed at a specific message, THAT message is the topic. A game panel means the actual options and values shown on it; a link preview means what the link is about; an attached image means what is in it.",
+  "2. The live channel snapshot is the current state of the channel. Trust it over your guesses, and read values directly off it instead of asking them to show you something that is already there.",
+  "3. Your memory block is real knowledge — use it. If a fact, a summary or an earlier message is in your context, never claim you can't see it or don't know.",
+  "4. Answer the actual question they asked, then stop — no filler, no changing the subject.",
+].join("\n");
+
 // --- Romance signal detection ----------------------------------------------
 // Feeds the attachment axis (separate from friendship affinity). DEEP signals
 // are direct affection aimed at her (weight 1.0); LIGHT signals are emotional

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { detectIntimacy, isAddressedToBot, isDuplicateReply, isGameCommand, isPointingAtBot, isReplyIdentityQuestion, normalizeReplyForDup, pickIdentityAnswer, replyAuthorsAgree, shouldResolveReplyTarget, SPONTANEOUS_OPENERS } from "../src/replies.js";
+import { CONTEXT_GROUNDING, detectIntimacy, isAddressedToBot, isDuplicateReply, isGameCommand, isPointingAtBot, isReplyIdentityQuestion, normalizeReplyForDup, pickIdentityAnswer, replyAuthorsAgree, shouldResolveReplyTarget, SPONTANEOUS_OPENERS } from "../src/replies.js";
 
 test("recognizes follow-up reply identity questions", () => {
   assert.equal(isReplyIdentityQuestion("how about now?"), true);
@@ -155,4 +155,16 @@ test("short deictic messages pointing at another bot are recognized", () => {
   assert.equal(isPointingAtBot("here's my plan for the weekend"), false);
   assert.equal(isPointingAtBot("where are you going"), false);
   assert.equal(isPointingAtBot("there once was a man from nantucket who really loved to fish every single morning"), false);
+});
+
+test("CONTEXT_GROUNDING carries the four grounding rules in order", () => {
+  // The rules that stop the airhead answers: read the pointed-at message,
+  // trust the live snapshot, use her memory, answer the actual question.
+  const lines = CONTEXT_GROUNDING.split("\n");
+  assert.ok(lines.length >= 5, "intro plus four rules");
+  assert.match(CONTEXT_GROUNDING, /ground yourself in what you were just given/);
+  assert.match(CONTEXT_GROUNDING, /1\. If they replied to or pointed at a specific message, THAT message is the topic/);
+  assert.match(CONTEXT_GROUNDING, /2\. The live channel snapshot is the current state of the channel/);
+  assert.match(CONTEXT_GROUNDING, /never claim you can't see it or don't know/);
+  assert.match(CONTEXT_GROUNDING, /4\. Answer the actual question they asked, then stop/);
 });

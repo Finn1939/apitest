@@ -87,6 +87,31 @@ She sees the whole conversation, not just plain text:
   `(deleted)`. Game-bot panels that edit in place (a HighLow card changing)
   keep her view current too.
 
+### Sharper replies
+
+Her replies used to be generated with private reasoning disabled and full
+sampling randomness (temperature 1.0), with no instruction to actually read
+the context she was handed — the recipe for a lovable airhead. Three changes,
+none of which touch her personality:
+
+- **Private reasoning on** — the reply model thinks before it answers
+  (`REPLY_THINKING`). The reasoning is internal: if the model inlines it as a
+  leading reasoning block, it is stripped from the stream before anything
+  reaches Discord, and reasoning delivered in a separate protocol field is
+  ignored entirely. While she thinks, the channel just sees her typing.
+  Reasoning also consumes part of the token budget, so `REPLY_MAX_TOKENS`
+  defaults to 1024 instead of 512.
+- **Grounded sampling** — `REPLY_TEMPERATURE` defaults to 0.7 instead of 1.0:
+  the same character, but she stops scattering. Raise it back toward 1.0 if
+  she ever feels too dry.
+- **Grounding rules** — the system prompt now ends with four rules, in order:
+  the message they replied to or pointed at is the topic; the live channel
+  snapshot is the current state of the channel, so read values off it instead
+  of asking to be shown what is already there; her memory block is real
+  knowledge, so never claim she can't see something that is in her context;
+  answer the actual question, then stop. Placement is deliberate — the last
+  block before the user turn is the position models attend to most.
+
 ### AI judgment layer
 
 Beyond composing replies, the same model makes small structured judgments

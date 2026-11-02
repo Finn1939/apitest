@@ -24,7 +24,7 @@ import { streamReply } from "./llm.js";
 import { deliverReply, deliverStreamedReply, renderAliveness } from "./aliveness.js";
 import { renderChannelSnapshot, renderDiscordMentions, renderEmbeds, renderButtons, renderMediaExtras, visionUserContent } from "./render.js";
 import { createAnalyst } from "./analysis.js";
-import { detectIntimacy, formatReactionSummary, isAddressedToBot, isDuplicateReply, isGameCommand, isPointingAtBot, isReplyIdentityQuestion, learnedGameCommands, pickIdentityAnswer, shouldResolveReplyTarget, SPONTANEOUS_OPENERS } from "./replies.js";
+import { detectIntimacy, formatReactionSummary, CONTEXT_GROUNDING, isAddressedToBot, isDuplicateReply, isGameCommand, isPointingAtBot, isReplyIdentityQuestion, learnedGameCommands, pickIdentityAnswer, shouldResolveReplyTarget, SPONTANEOUS_OPENERS } from "./replies.js";
 
 validateConfig();
 
@@ -1529,6 +1529,10 @@ client.on(Events.MessageCreate, async (message) => {
             ...(visionImages.length
               ? ["This message includes attached image(s) and you can actually see them. Look at them properly: mention what you concretely notice — people, animals, text, places, the vibe — like a friend who actually opened the photo, not someone guessing from the filename. Describe what stands out; that description is how you'll remember the image later."]
               : []),
+            // Grounding goes LAST, right before the user turn: models weight the
+            // end of the context most, and these rules are what make her read
+            // the panel/preview/memory she was handed instead of guessing.
+            CONTEXT_GROUNDING,
           ].filter(Boolean).join("\n"),
         },
         // A bare @-mention that fell through above must not become an empty
