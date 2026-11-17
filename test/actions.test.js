@@ -198,7 +198,48 @@ test('planner proposes only; approval executes and reports actual success', asyn
   const handler = createActionHandler({ allowedUserIds: new Set([actorId]), completeAI: async () => { assert.equal(f.calls.length, 0); return JSON.stringify(plan(step('role_delete', { role: roleId }))); } });
   assert.equal(await handler(f.message), true);
   assert.deepEqual(f.calls, [['delete']]);
+  assert.equal(f.replies[0].components[0].components[0].data.label, 'Confirm deletion');
   assert.match(f.edits.at(-1).content, /done/);
+});
+test('ambiguous request to remove a channel name clarifies instead of proposing channel deletion', async () => {
+  const f = fixture(); const replies = [];
+  f.message.content = 'Capri remove the channel name';
+  f.message.reply = async data => { replies.push(data); return {}; };
+  const handler = createActionHandler({
+    allowedUserIds: new Set([actorId]),
+    completeAI: async () => { throw new Error('planner must not run'); },
+  });
+  assert.equal(await handler(f.message), true);
+  assert.match(replies[0].content, /Discord requires every channel to have a name/);
+  assert.equal(replies[0].components, undefined);
+  assert.equal(f.calls.length, 0);
+});
+test('a repeated request links to its visible pending deletion confirmation', async () => {
+  const f = fixture(); const replies = []; let releaseConfirmation;
+  f.message.reply = async data => {
+    replies.push(data);
+    if (!data.components) return {};
+    return {
+      url: 'https://discord.test/pending-confirmation',
+      edit: async () => {},
+      awaitMessageComponent: () => new Promise(resolve => { releaseConfirmation = resolve; }),
+    };
+  };
+  const handler = createActionHandler({
+    allowedUserIds: new Set([actorId]),
+    completeAI: async () => JSON.stringify(plan(step('channel_delete', { channel: channelId }))),
+  });
+  const firstRequest = handler(f.message);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(replies[0].components[0].components[0].data.label, 'Confirm deletion');
+  const repeatedRequest = { ...f.message, id: '200000000000000002', content: 'Capri delete this channel' };
+  assert.equal(await handler(repeatedRequest), true);
+  assert.match(replies[1].content, /https:\/\/discord\.test\/pending-confirmation/);
+  assert.match(replies[1].content, /Confirm deletion/);
+  const cancelId = replies[0].components[0].components[1].data.custom_id;
+  releaseConfirmation({ customId: cancelId, user: { id: actorId }, deferUpdate: async () => {} });
+  await firstRequest;
+  assert.equal(f.calls.some(call => call[0] === 'channel_delete'), false);
 });
 for (const mode of ['cancel', 'timeout', 'revoke']) test(`${mode} prevents execution`, async () => {
   const f = previewFixture(mode);

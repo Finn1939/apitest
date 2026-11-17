@@ -309,6 +309,10 @@ function isActionFollowup(text) {
   return ACTION_FOLLOWUP.test(text || '');
 }
 
+function asksToRemoveChannelName(text) {
+  return /\b(?:remove|clear|erase)\b.{0,40}\bchannel(?:'s)?\s+name\b|\bchannel(?:'s)?\s+name\b.{0,40}\b(?:remove|clear|erase)\b/i.test(text || '');
+}
+
 function actionRequestText(message, prefix) {
   const text = message.content || '';
   const commandPrefix = `${prefix.toLowerCase()} do `;
@@ -372,7 +376,7 @@ export function createActionHandler({
   onRequest = () => {},
   onReply = () => {},
 }) {
-  const planning = new Set();
+  const planning = new Map();
   return async function handleActions(message) {
     if (!enabled) return false;
     let requestRecorded = false;
@@ -410,11 +414,21 @@ export function createActionHandler({
       return true;
     }
     const key = `${message.guild.id}:${message.author.id}`;
-    if (planning.has(key)) {
+    const pending = planning.get(key);
+    if (pending) {
       recordRequest();
-      await reply('Your last action request is still running or waiting for deletion confirmation.'); return true;
+      const content = pending.confirmationUrl
+        ? `A deletion confirmation is already posted here: ${pending.confirmationUrl}. Click **Confirm deletion** or **Cancel** there; nothing happens until you confirm.`
+        : 'Your last action request is still being prepared. No change has happened yet.';
+      await reply(content);
+      return true;
     }
-    planning.add(key);
+    if (asksToRemoveChannelName(message.content)) {
+      recordRequest();
+      await reply('Discord requires every channel to have a name. Did you mean rename this channel, or delete the entire channel? I won’t delete it based on “remove the channel name.”');
+      return true;
+    }
+    planning.set(key, { stage: 'planning' });
     try {
       const recentConversation = actionFollowup ? getRecentContext(message) : '';
       if (actionFollowup && !recentConversation) {
@@ -466,15 +480,16 @@ export function createActionHandler({
       const snapshot = JSON.stringify(plan);
       const token = randomUUID();
       const rows = [new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`capri:approve:${token}`).setLabel('Run these actions').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId(`capri:approve:${token}`).setLabel('Confirm deletion').setStyle(ButtonStyle.Danger),
         new ButtonBuilder().setCustomId(`capri:cancel:${token}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary),
       )];
       const details = plan.actions.map((s, i) => `${i + 1}. ${s.action}\n${JSON.stringify(s.args)}`).join('\n\n');
       const sent = await message.reply({
-        content: 'This request includes deletion. Review capri-action-plan.txt for the exact targets and values, then approve within 2 minutes. The entire plan waits for your approval. Completed steps cannot be automatically undone. Permissions are checked again when you approve.\n\n' + plan.actions.map((s, i) => `${i + 1}. ${s.action}`).join('\n'),
+        content: '⚠️ This plan will delete data. Nothing has happened yet. Review capri-action-plan.txt, then click **Confirm deletion** within 2 minutes to proceed or **Cancel** to stop. Permissions are checked again when you confirm.\n\n' + plan.actions.map((s, i) => `${i + 1}. ${s.action}`).join('\n'),
         files: [{ attachment: Buffer.from(details), name: 'capri-action-plan.txt' }],
         components: rows, allowedMentions: { parse: [] },
       });
+      planning.set(key, { stage: 'confirmation', confirmationUrl: sent.url });
       let click;
       try {
         click = await sent.awaitMessageComponent({ time: 120000, filter: i => i.user.id === message.author.id && [ `capri:approve:${token}`, `capri:cancel:${token}` ].includes(i.customId) });
