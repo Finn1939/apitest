@@ -207,6 +207,18 @@ for (const ids of [new Set(), new Set([targetId])]) test('unlisted users are den
   assert.equal(f.calls.length, 0);
   assert.match(replies[0].content, /COMMAND_USER_IDS/);
 });
+test('unlisted direct action requests cannot fall through to ordinary chat', async () => {
+  const f = fixture(); const replies = [];
+  f.message.content = 'Bet, running it again—add sprite to brochacho.';
+  f.message.reply = async data => { replies.push(data); return {}; };
+  const handle = createActionHandler({
+    allowedUserIds: new Set([targetId]),
+    completeAI: async () => { throw new Error('planner must not run'); },
+  });
+  assert.equal(await handle(f.message), true);
+  assert.match(replies[0].content, /COMMAND_USER_IDS/);
+  assert.equal(f.calls.length, 0);
+});
 test('allowlisted user commands without an explicit bot address execute immediately', async () => {
   const f = fixture(); const replies = [];
   f.message.content = 'Could you rename the server to Night City?';

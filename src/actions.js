@@ -348,7 +348,10 @@ export function createActionHandler({
     };
     const explicitlyAddressed = isActionRequest(message, prefix);
     if (!canRunCommands(message.author.id, allowedUserIds)) {
-      if (!explicitlyAddressed) return false;
+      if (!explicitlyAddressed) {
+        const { request } = actionRequestText(message, prefix);
+        if (!isActionRequest(message, prefix, true) || !isDirectActionRequest(request)) return false;
+      }
       recordRequest();
       await reply(COMMAND_DENIED);
       return true;
