@@ -24,6 +24,7 @@ test("extractJson parses plain, fenced, and dirty JSON answers", () => {
   assert.deepEqual(extractJson('{"a":1}'), { a: 1 });
   assert.deepEqual(extractJson('```json\n{"a":1}\n```'), { a: 1 });
   assert.deepEqual(extractJson('Sure thing!\n{"a":{"b":2}}\nHope that helps.'), { a: { b: 2 } });
+  assert.deepEqual(extractJson('{"a":"escaped \\"quote\\" and } brace"} trailing model chatter'), { a: 'escaped "quote" and } brace' });
   assert.equal(extractJson("no json here"), null);
   assert.equal(extractJson(""), null);
   assert.equal(extractJson("{broken"), null);

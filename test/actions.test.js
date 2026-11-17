@@ -199,6 +199,14 @@ test('create-and-assign role plans execute immediately without confirmation', as
   assert.deepEqual(f.calls.map(call => call[0]), ['create', 'role_add']);
   assert.equal(replies.length, 1);
 });
+test('planner output with trailing chatter still executes its valid JSON plan', async () => {
+  const f = fixture();
+  f.message.reply = async () => ({});
+  const response = `${JSON.stringify(plan(step('server_rename', { name: 'Night City' })))}\nI have prepared that for you.`;
+  const handle = createActionHandler({ allowedUserIds: new Set([actorId]), completeAI: async () => response });
+  assert.equal(await handle(f.message), true);
+  assert.deepEqual(f.calls, [['rename', 'Night City']]);
+});
 test('unlisted users still get ordinary chat even when a message mentions server or role', async () => {
   const f = fixture();
   f.message.content = 'Hey Capri, should we change the server name? That role is odd.';
