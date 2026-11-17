@@ -44,7 +44,7 @@ test('validates chained role creation with a reference', () => {
   assert.equal(validatePlan(plan(step('role_create', { name: 'Crew' }), step('role_add', { role: '$last_role', user: targetId }))).actions.length, 2);
 });
 test('rejects arbitrary endpoints, unknown fields, malformed IDs and unsafe ranges', () => {
-  for (const action of [step('eval', { code: 'x' }), step('server_rename', { name: 'X', token: 'x' }), step('member_unban', { user: '@someone' }), step('member_timeout', { user: targetId, minutes: -1 }), step('message_purge', { channel: channelId, count: 101 }), step('role_create', { name: 'X', permissions: ['FakeFlag'] }), step('role_add', { role: '$last_channel', user: targetId })]) assert.throws(() => validatePlan(plan(action)));
+  for (const action of [step('eval', { code: 'x' }), step('server_rename', { name: 'X', token: 'x' }), step('member_unban', { user: '@someone' }), step('member_timeout', { user: targetId, minutes: -1 }), step('message_purge', { channel: channelId, count: 101 }), step('role_create', { name: 'X', permissions: ['FakeFlag'] }), step('role_add', { role: '$last_channel', user: targetId }), step('channel_edit', { channel: channelId })]) assert.throws(() => validatePlan(plan(action)));
   assert.throws(() => validatePlan({ actions: [] }));
   assert.throws(() => validatePlan({ actions: Array(9).fill(step('server_rename', { name: 'X' })) }));
 });
