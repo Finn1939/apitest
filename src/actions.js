@@ -94,8 +94,13 @@ function checkRole(guild, actor, bot, role) {
 function resolveMemberId(message, value) {
   const text = value.trim();
   const mention = text.match(/^<@!?(\d{17,20})>$/);
-  if (idPattern.test(text)) return text;
-  if (mention) return mention[1];
+  const explicitIds = new Set(message.content.match(/\d{17,20}/g) || []);
+  for (const id of message.mentions.users?.keys?.() || []) explicitIds.add(id);
+  if (idPattern.test(text) || mention) {
+    const id = idPattern.test(text) ? text : mention[1];
+    if (!explicitIds.has(id)) throw new Error('I won’t infer a member ID from a name. Mention the intended member or provide their exact user ID.');
+    return id;
+  }
   const requestedName = text.replace(/^@/, '').trim().toLocaleLowerCase();
   const cachedMembers = [
     ...(message.guild.members.cache?.values() || []),

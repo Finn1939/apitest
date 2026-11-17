@@ -68,11 +68,21 @@ test('equal/higher targets and owner cannot be moderated', () => {
 });
 test('role creation and assignment execute in order using returned role ID', async () => {
   const f = fixture();
+  f.message.content = `Hey Capri add Crew to <@${targetId}>`;
   const result = await executePlan(f.message, plan(step('role_create', { name: 'Crew' }), step('role_add', { role: '$last_role', user: targetId })));
   assert.equal(result.length, 2);
   assert.deepEqual(f.calls.map(c => c[0]), ['create', 'role_add']);
   assert.deepEqual(f.calls[0][1].permissions, []);
   assert.equal(f.calls[1][1], roleId);
+});
+test('does not trust a planner-generated member ID absent from the request', async () => {
+  const f = fixture();
+  f.message.content = 'add sprite to brochacho';
+  await assert.rejects(
+    executeStep(f.message, step('role_add', { role: roleId, user: ownerId })),
+    /won’t infer a member ID from a name/,
+  );
+  assert.deepEqual(f.calls, []);
 });
 test('resolves an exact cached member name, but never guesses when there is no match', async () => {
   const f = fixture();
@@ -104,6 +114,7 @@ test('cannot create elevated role or assign role beyond requester permissions', 
   const f = fixture(); f.actor.permissions = new PermissionsBitField([P.ManageRoles]);
   await assert.rejects(executeStep(f.message, step('role_create', { name: 'Admin', permissions: ['Administrator'] })), /Missing Administrator/);
   f.role.permissions = new PermissionsBitField([P.Administrator]);
+  f.message.content = `Hey Capri add the role to <@${targetId}>`;
   await assert.rejects(executeStep(f.message, step('role_add', { role: roleId, user: targetId })), /beyond yours/);
   assert.equal(f.calls.length, 0);
 });
@@ -114,6 +125,7 @@ test('partial failure stops subsequent steps and reports completed work', async 
 });
 test('ban uses audit reason and does not delete message history', async () => {
   const f = fixture();
+  f.message.content = `Hey Capri ban <@${targetId}>`;
   await executeStep(f.message, step('member_ban', { user: targetId, reason: 'Spam' }));
   assert.equal(f.calls[0][1].deleteMessageSeconds, 0);
   assert.match(f.calls[0][1].reason, /Spam/);
@@ -193,6 +205,7 @@ test('only delete and purge operations require approval; removal, bans and kicks
 });
 for (const operation of [step('server_rename', { name: 'Night City' }), step('role_add', { role: roleId, user: targetId }), step('member_ban', { user: targetId })]) test(`${operation.action} executes immediately without files, buttons or a collector`, async () => {
   const f = fixture(); const replies = [];
+  if (operation.args.user) f.message.content = `Hey Capri ${operation.action === 'member_ban' ? 'ban' : 'add role to'} <@${targetId}>`;
   f.message.reply = async data => { assert.equal(data.components, undefined); assert.equal(data.files, undefined); replies.push(data); return {}; };
   const handle = createActionHandler({ allowedUserIds: new Set([actorId]), completeAI: async () => JSON.stringify(plan(operation)) });
   assert.equal(await handle(f.message), true);
@@ -230,6 +243,7 @@ test('allowlisted user commands without an explicit bot address execute immediat
 });
 test('create-and-assign role plans execute immediately without confirmation', async () => {
   const f = fixture(); const replies = [];
+  f.message.content = `Hey Capri add poker to <@${targetId}>`;
   f.message.reply = async data => { assert.equal(data.components, undefined); assert.equal(data.files, undefined); replies.push(data); return {}; };
   const handle = createActionHandler({
     allowedUserIds: new Set([actorId]),
@@ -245,10 +259,13 @@ test('create-and-assign role plans execute immediately without confirmation', as
 test('casually prefaced role assignments still execute immediately', async () => {
   const f = fixture(); const replies = [];
   f.message.content = 'Bet, running it again—add sprite to brochacho.';
+  f.target.displayName = 'brochacho';
+  f.target.user = { username: 'brochacho' };
+  f.guild.members.cache = new Collection([[targetId, f.target]]);
   f.message.reply = async data => { assert.equal(data.components, undefined); assert.equal(data.files, undefined); replies.push(data); return {}; };
   const handle = createActionHandler({
     allowedUserIds: new Set([actorId]),
-    completeAI: async () => JSON.stringify(plan(step('role_add', { role: roleId, user: targetId }))),
+    completeAI: async () => JSON.stringify(plan(step('role_add', { role: roleId, user: 'brochacho' }))),
   });
   assert.equal(await handle(f.message), true);
   assert.deepEqual(f.calls.map(call => call[0]), ['role_add']);
