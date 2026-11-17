@@ -62,6 +62,9 @@ test('allowlisted users can phrase clear action requests casually without addres
   assert.equal(isActionRequest({ content: 'Could you rename the server to Night City?' }, 't', true), true);
   assert.equal(isActionRequest({ content: 'Try removing slowmode' }, 't', true), true);
   assert.equal(isActionRequest({ content: 'Bet, running it again—add sprite to brochacho.' }, 't', true), true);
+  assert.equal(isActionRequest({ content: 'name it general' }, 't', true), true);
+  assert.equal(isActionRequest({ content: 'default the channel name here' }, 't', true), true);
+  assert.equal(isActionRequest({ content: 'Name your favorite song' }, 't', true), false);
   assert.equal(isActionRequest({ content: 'How do I create a role?' }, 't', true), false);
   assert.equal(isActionRequest({ content: 'Please do not delete that channel' }, 't', true), false);
   assert.equal(isActionRequest({ content: 'I think their role is funny' }, 't', true), false);
@@ -116,6 +119,47 @@ test('channel renames report the exact verified old and new names', async () => 
   const result = await executeStep(f.message, step('channel_edit', { channel: channelId, name: 'bot-lounge' }));
   assert.equal(f.channel.name, 'bot-lounge');
   assert.match(result, /Renamed #general to #bot-lounge/);
+});
+test('AI uses recent context and preserves the exact name in a casual channel rename', async () => {
+  const f = fixture(); const replies = [];
+  f.channel.name = 'capri-removed';
+  f.message.content = 'name it general';
+  f.message.reply = async data => { replies.push(data.content); return {}; };
+  let plannerInput; let plannerInstructions;
+  const handler = createActionHandler({
+    allowedUserIds: new Set([actorId]),
+    getRecentContext: () => 'User: default the channel name here\nCapri: Renamed #capri-removed to #general-chat.',
+    completeAI: async ({ messages }) => {
+      plannerInput = JSON.parse(messages.at(-1).content);
+      plannerInstructions = messages[0].content;
+      return JSON.stringify(plan(step('channel_edit', { channel: channelId, name: 'general' })));
+    },
+  });
+  assert.equal(await handler(f.message), true);
+  assert.equal(plannerInput.context.currentChannel, channelId);
+  assert.match(plannerInput.context.recentConversation, /capri-removed/);
+  assert.match(plannerInstructions, /"name it general" means name "general"/);
+  assert.equal(f.channel.name, 'general');
+  assert.match(replies[0], /Renamed #capri-removed to #general/);
+});
+test('AI asks for an exact name instead of guessing what a default channel name means', async () => {
+  const f = fixture(); const replies = [];
+  f.message.content = 'Hey Capri default the channel name here';
+  f.message.reply = async data => { replies.push(data.content); return {}; };
+  let plannerInput;
+  const handler = createActionHandler({
+    allowedUserIds: new Set([actorId]),
+    getRecentContext: () => 'User asked to restore the channel name.',
+    completeAI: async ({ messages }) => {
+      plannerInput = JSON.parse(messages.at(-1).content);
+      return JSON.stringify({ actions: [], clarification: 'What exact channel name should I use?' });
+    },
+  });
+  assert.equal(await handler(f.message), true);
+  assert.match(plannerInput.context.recentConversation, /restore/);
+  assert.match(replies[0], /What exact channel name/);
+  assert.equal(f.calls.length, 0);
+  assert.equal(f.channel.name, 'general');
 });
 test('resolves an exact cached member name, but never guesses when there is no match', async () => {
   const f = fixture();
