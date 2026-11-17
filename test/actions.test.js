@@ -13,10 +13,14 @@ function fixture() {
   const role = { ...position(2), id: roleId, name: 'Crew', permissions: new PermissionsBitField(), editable: true, managed: false, delete: async () => calls.push(['delete']) };
   const channel = {
     id: channelId, name: 'general', guildId: ownerId, rateLimitPerUser: 5,
+    topic: null, nsfw: false,
     permissionsFor: m => m.permissions, isTextBased: () => true, isThread: () => false,
     edit: async options => {
       calls.push(['channel_edit', options]);
       if (options.rateLimitPerUser !== undefined) channel.rateLimitPerUser = options.rateLimitPerUser;
+      if (options.name !== undefined) channel.name = options.name;
+      if (options.topic !== undefined) channel.topic = options.topic || null;
+      if (options.nsfw !== undefined) channel.nsfw = options.nsfw;
       return channel;
     },
     send: async data => { calls.push(['send', data]); return { id: '123456789012345678' }; },
@@ -98,7 +102,7 @@ test('slowmode changes are reported only after a fresh Discord readback', async 
   const f = fixture();
   const result = await executeStep(f.message, step('channel_edit', { channel: channelId, slowmode: 0 }));
   assert.equal(f.channel.rateLimitPerUser, 0);
-  assert.match(result, /Slowmode removed and verified/);
+  assert.match(result, /Removed slowmode from #general/);
 
   const stale = fixture();
   stale.channel.edit = async options => stale.calls.push(['channel_edit', options]);
@@ -106,6 +110,12 @@ test('slowmode changes are reported only after a fresh Discord readback', async 
     executeStep(stale.message, step('channel_edit', { channel: channelId, slowmode: 0 })),
     /Slowmode verification failed/,
   );
+});
+test('channel renames report the exact verified old and new names', async () => {
+  const f = fixture();
+  const result = await executeStep(f.message, step('channel_edit', { channel: channelId, name: 'bot-lounge' }));
+  assert.equal(f.channel.name, 'bot-lounge');
+  assert.match(result, /Renamed #general to #bot-lounge/);
 });
 test('resolves an exact cached member name, but never guesses when there is no match', async () => {
   const f = fixture();
@@ -314,7 +324,7 @@ for (const followup of [
   assert.equal(await handle(f.message), true);
   assert.match(plannerInput.context.recentConversation, /remove slowmode/);
   assert.equal(f.channel.rateLimitPerUser, 0);
-  assert.match(replies[0].content, /Slowmode removed and verified/);
+  assert.match(replies[0].content, /Removed slowmode from #general/);
 });
 test('a follow-up without a recent action asks what to retry', async () => {
   const f = fixture(); const replies = [];

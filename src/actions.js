@@ -194,17 +194,32 @@ export async function executeStep(message, step, refs = {}) {
       refs.$last_channel = created.id; return `Created channel ${created.name} (${created.id}).`;
     }
     case 'channel_edit': {
+      const oldName = channel.name;
       await channel.edit(channelOptions);
+      const updated = await guild.channels.fetch(channel.id, { force: true });
+      const changes = [];
+      if (a.name !== undefined) {
+        if (updated.name !== a.name) throw new Error(`Channel rename verification failed; Discord still reports "${updated.name}".`);
+        changes.push(`Renamed #${oldName} to #${updated.name}.`);
+      }
+      if (a.topic !== undefined) {
+        const expectedTopic = a.topic || null;
+        if ((updated.topic || null) !== expectedTopic) throw new Error('Channel topic verification failed.');
+        changes.push(`Updated the topic in #${updated.name || updated.id}.`);
+      }
+      if (a.nsfw !== undefined) {
+        if (updated.nsfw !== a.nsfw) throw new Error('NSFW setting verification failed.');
+        changes.push(`${a.nsfw ? 'Enabled' : 'Disabled'} NSFW in #${updated.name || updated.id}.`);
+      }
       if (a.slowmode !== undefined) {
-        const updated = await guild.channels.fetch(channel.id, { force: true });
         if (updated.rateLimitPerUser !== a.slowmode) {
           throw new Error(`Slowmode verification failed; Discord still reports ${updated.rateLimitPerUser} seconds.`);
         }
-        return a.slowmode === 0
-          ? `Slowmode removed and verified in #${updated.name || updated.id}.`
-          : `Slowmode set to ${a.slowmode} seconds and verified in #${updated.name || updated.id}.`;
+        changes.push(a.slowmode === 0
+          ? `Removed slowmode from #${updated.name || updated.id}.`
+          : `Set slowmode in #${updated.name || updated.id} to ${a.slowmode} seconds.`);
       }
-      break;
+      return changes.length ? changes.join(' ') : `Updated #${updated.name || updated.id}.`;
     }
     case 'channel_delete': await channel.delete(reason); break;
     case 'member_ban': if (!target.bannable) throw new Error('Member is not bannable.'); await target.ban({ reason, deleteMessageSeconds: 0 }); break;

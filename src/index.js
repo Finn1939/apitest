@@ -1561,6 +1561,7 @@ client.on(Events.MessageCreate, async (message) => {
             "Reply conversationally and naturally, like chatting with a friend on Discord.",
             "Use Discord-friendly formatting and keep replies concise.",
             "Never invent Discord action plans or confirmation buttons, or claim a server change is pending or complete. Only report an action when the action handler's actual result is present in the conversation.",
+            "When asked what a recent Discord action changed, answer only from the latest matching action result in recent conversation; if it does not state the exact value, say you do not know rather than guessing or mixing in an unrelated action.",
             renderAliveness(new Date(), lastSpokeAtRef.value),
             factsContextText,
             persistentContext.memoryBlock,
