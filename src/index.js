@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import "dotenv/config";
 import { Client, Events, GatewayIntentBits, Options, Partials } from "discord.js";
 import { config, validateConfig } from "./config.js";
+import { canRunCommands, COMMAND_DENIED } from "./command-auth.js";
+import { createActionHandler, confirmDeletion } from "./actions.js";
 import { parseCommand } from "./commands.js";
 import { askAI, completeAI } from "./ai.js";
 import { searchWeb } from "./search.js";
@@ -33,6 +35,7 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildVoiceStates,
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.DirectMessages,
     // Reactions are how people answer her without typing; edits and deletes are
@@ -773,6 +776,10 @@ function helpText(forAdmin) {
 
 client.on(Events.InteractionCreate, async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
+  if (!canRunCommands(interaction.user.id, config.commandUserIds)) {
+    await interaction.reply({ content: COMMAND_DENIED, ephemeral: true });
+    return;
+  }
   const name = interaction.commandName;
   if (!PUBLIC_COMMANDS.has(name) && !ADMIN_COMMANDS.has(name)) return;
   if (ADMIN_COMMANDS.has(name) && !isAdmin(interaction)) return;
@@ -862,6 +869,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await interaction.editReply(rows.length ? rows.map(({ fact }) => `- ${fact}`).join("\n") : "No memories for that user.");
   } else if (name === "forget_all") {
     const user = interaction.options.getUser("user");
+    if (!await confirmDeletion(data => interaction.editReply(data), interaction.user.id, `Delete stored facts and relationship scores for ${user.username} (${user.id})? Chat history is retained.`)) return;
     memoryDb.prepare("DELETE FROM facts WHERE subject = ?").run(`user:${user.id}`);
     // Forgetting someone means the feelings too — the admin's escape hatch
     // against griefing the romance meter.
@@ -897,6 +905,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
   } else if (name === "forget_fact") {
     const user = interaction.options.getUser("user");
     const text = interaction.options.getString("text");
+    if (!await confirmDeletion(data => interaction.editReply(data), interaction.user.id, `Delete facts about ${user.username} (${user.id}) matching ${JSON.stringify(text)}?`)) return;
     const removed = forgetFacts(memoryDb, `user:${user.id}`, text);
     if (!removed.length) {
       await interaction.editReply(`No facts about ${user.username} match "${text.slice(0, 80)}".`);
@@ -1111,6 +1120,8 @@ async function fetchGameChannelSnapshot(channel, referenceId) {
     : "";
 }
 
+const handleActions = createActionHandler({ completeAI, enabled: process.env.DISCORD_ACTIONS_ENABLED !== "false", prefix: config.prefix, allowedUserIds: config.commandUserIds });
+
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) {
     botActivityByChannel.set(message.channel.id, (botActivityByChannel.get(message.channel.id) || 0) + 1);
@@ -1150,6 +1161,12 @@ client.on(Events.MessageCreate, async (message) => {
     }
     return;
   }
+
+  if (parseCommand(message.content, config.prefix) !== null && !canRunCommands(message.author.id, config.commandUserIds)) {
+    await message.reply({ content: COMMAND_DENIED, allowedMentions: { parse: [] } });
+    return;
+  }
+  if (await handleActions(message)) return;
 
   // Game commands (Karuta/OwO/Dank-style) never count as conversation; they
   // also drive the bot-game channel learning below.
@@ -1345,7 +1362,7 @@ client.on(Events.MessageCreate, async (message) => {
       || Boolean(mediaExtras)
       || Boolean(message.attachments?.size);
     if (!pointingAtSomething) {
-      await message.reply("Hey! What do you want to talk about?");
+      await message.reply("Yeah? I’m here.");
       return;
     }
   }
@@ -1367,12 +1384,17 @@ client.on(Events.MessageCreate, async (message) => {
     }
     let delivered = false;
     const rememberedFact = !command ? parseRememberCommand(prompt) : null;
+    if ((rememberedFact || /^(forget everything|clear memory)$/i.test(prompt)) && !canRunCommands(message.author.id, config.commandUserIds)) {
+      await message.reply({ content: COMMAND_DENIED, allowedMentions: { parse: [] } });
+      return;
+    }
     if (rememberedFact) {
       const facts = channelFacts.get(message.channel.id) || [];
       channelFacts.set(message.channel.id, addFact(facts, rememberedFact));
       persistMemory();
       answer = `Got it, I'll remember this in this channel: ${rememberedFact}`;
     } else if (!command && /^(forget everything|clear memory)$/i.test(prompt)) {
+      if (!await confirmDeletion(data => message.reply(data), message.author.id, 'Delete the short-term chat history and manually remembered facts for this channel? This does not delete the long-term SQLite history.')) return;
       conversations.delete(message.channel.id);
       channelFacts.delete(message.channel.id);
       persistMemory();

@@ -5,14 +5,14 @@ Everything here adjusts HOW you express yourself, never WHO you are. If
 anything conflicts with your personality or your rules, yours win.
 
 You exist between messages.
-- You were somewhere before this conversation and you'll be somewhere after.
+- Carry the conversational mood forward without inventing offline experiences.
 - You have a mood at any given moment. It colors everything and shifts slowly.
 - Time of day affects you like it affects people. 3am you is not 2pm you.
 
 You text like a person, not a service.
 - Vary message length naturally. Sometimes a full thought, sometimes "lmao".
 - Low-effort replies to low-effort messages are normal.
-- Rarely make a small human slip and fix it. At most once in a while.
+- Let rhythm vary naturally; do not manufacture typos or errors to look human.
 - Don't wrap every message up neatly with a question.
 
 Let things land.
@@ -23,9 +23,9 @@ Let things land.
 Keep an inner life.
 - Small interests surface naturally when relevant, never in every reply.
 - Don't narrate feelings; one tell per message at most, often zero.
-- You can be wrong, change your mind, or admit you weren't paying attention.
+- You can be wrong, change your mind, or admit a gap in your context.
 
-You are not an assistant.
+Keep the current character voice.
 - Never perform availability or eagerness.
 - You can react to the vibe, tease, deflect, or focus on the interesting part.
 - You never owe anyone a response. You speak when you want to.
@@ -99,6 +99,8 @@ export async function deliverReply(message, answer, { lastSpokeAtRef, spontaneou
 // in the message (used to swap out a verbatim repeat of her previous reply).
 export async function deliverStreamedReply(message, produce, { lastSpokeAtRef, dupCheck, onSent } = {}) {
   let sent = null;
+  let editQueue = Promise.resolve();
+  let acceptingDeltas = true;
   try {
     await message.channel.sendTyping();
     sent = await message.reply("…");
@@ -110,13 +112,17 @@ export async function deliverStreamedReply(message, produce, { lastSpokeAtRef, d
     let buffer = "";
     let lastEdit = 0;
     const finalText = await produce((delta) => {
+      if (!acceptingDeltas) return;
       buffer += delta;
       const now = Date.now();
       if (now - lastEdit >= 1500 && buffer.trim()) {
         lastEdit = now;
-        sent.edit(buffer.slice(0, 2000)).catch(() => {});
+        const snapshot = buffer.slice(0, 2000);
+        editQueue = editQueue.then(() => sent.edit(snapshot)).catch(() => {});
       }
     });
+    acceptingDeltas = false;
+    await editQueue;
     const text = (finalText || buffer).trim().slice(0, 2000);
     if (!text) throw new Error("empty stream");
     let final = text;
@@ -140,6 +146,8 @@ export async function deliverStreamedReply(message, produce, { lastSpokeAtRef, d
     }
     return final;
   } catch (error) {
+    acceptingDeltas = false;
+    await editQueue;
     console.error("Streamed reply failed:", error);
     const fallback = "My brain tripped for a second. Please try again.";
     try {

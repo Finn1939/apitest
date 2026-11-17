@@ -1,3 +1,7 @@
+# Capri Direct Commands Edition
+
+Start with [START_HERE.md](START_HERE.md). The [Discord actions guide](DISCORD_ACTIONS.md) documents the new natural-language execution layer. The original bot documentation below still uses its earlier name.
+
 # Human Discord Bot
 
 A configurable Discord chat and research bot. It can chat conversationally, responds when mentioned, and answers search requests using the `t` prefix.
@@ -8,13 +12,13 @@ A configurable Discord chat and research bot. It can chat conversationally, resp
 2. Under **Bot**, enable **Message Content Intent**.
 3. Invite the bot with `bot` permissions and the permission to read/send messages.
 4. Create a [NVIDIA API key](https://build.nvidia.com/) for the NVIDIA API Catalog.
-5. Install Node.js 19 or newer.
+5. Install Node.js 22 (recommended for the bundled dependency versions).
 6. Copy `.env.example` to `.env` and fill in the values.
 
 ```bash
 npm install
 # If better-sqlite3 fails to build on your Node version, restore the bundled binding:
-cp better_sqlite3.compat.node node_modules/better-sqlite3/build/Release/better_sqlite3.node
+# Rebuild native dependencies on your own host if needed: npm rebuild better-sqlite3
 npm start
 ```
 

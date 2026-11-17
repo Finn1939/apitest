@@ -1,3 +1,4 @@
+import { config } from "./config.js";
 import PQueue from "p-queue";
 import { pipeline } from "@huggingface/transformers";
 import { completeAI } from "./ai.js";
@@ -97,7 +98,7 @@ export function createJobs(db) {
     return completeAI({
       messages: [{
         role: "system",
-        content: PROMPT_C.replace("{{SELF_MODEL}}", () => model)
+        content: `Current fixed personality (takes precedence over old self-model voice): ${config.personality}\n` + PROMPT_C.replace("{{SELF_MODEL}}", () => model)
           .replace("{{SUMMARIES}}", () => summaries.map((row) => row.summary).join("\n"))
           .replace("{{FACTS}}", () => facts.map((row) => `${row.subject}: ${row.fact}`).join("\n"))
           .replace("{{JOURNAL}}", () => journal.map((row) => row.entry).join("\n")),

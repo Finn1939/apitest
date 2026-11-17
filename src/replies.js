@@ -13,7 +13,7 @@ export function isReplyIdentityQuestion(prompt) {
 
 export function isAddressedToBot(content, options = {}) {
   const text = String(content || "").toLowerCase();
-  const botNames = [options.botUsername, "teacher-san", "teachersan", "teacher san"]
+  const botNames = [options.botUsername, "capri", "teacher-san", "teachersan", "teacher san"]
     .filter(Boolean)
     .map((name) => String(name).toLowerCase());
 
@@ -210,25 +210,25 @@ export function shouldResolveReplyTarget({ hasReference, mentioned, addressed, e
 export function pickIdentityAnswer(replyTarget, selfName = "me") {
   if (!replyTarget) {
     const variants = [
-      "I can't see the message you replied to anymore, nya... it might have been deleted.",
-      "Hmm, I can't verify that reply anymore, sorry~",
+      "I can't see that message anymore. Might have been deleted.",
+      "I can't verify that reply anymore. Send me the message again.",
     ];
     return variants[Math.floor(Math.random() * variants.length)];
   }
   if (replyTarget.isSelf) {
     const variants = [
-      `That's me, ${selfName}~ 🐾`,
-      `That one's mine, nya! You're replying to ${selfName}.`,
-      `You're replying to me, ${selfName}, ehe~`,
+      `That's me, ${selfName}.`,
+      `That one's mine. You're replying to ${selfName}.`,
+      `Me. ${selfName}.`,
     ];
     return variants[Math.floor(Math.random() * variants.length)];
   }
   const name = replyTarget.authorName || "someone";
   const withContent = replyTarget.content ? ` — the one that said "${replyTarget.content.slice(0, 80)}"` : "";
   const variants = [
-    `You're replying to ${name}${withContent}, nya~`,
+    `You're replying to ${name}${withContent}.`,
     `That's ${name}${withContent}!`,
-    `${name}, nya~ that's who you replied to${withContent}.`,
+    `${name}. That's who you replied to${withContent}.`,
   ];
   return variants[Math.floor(Math.random() * variants.length)];
 }

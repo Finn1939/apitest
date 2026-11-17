@@ -1,3 +1,4 @@
+import { parseCommandUserIds } from "./command-auth.js";
 import { readFileSync } from "node:fs";
 
 const personalityPath = process.env.PERSONALITY_PATH || "personality.txt";
@@ -17,6 +18,7 @@ try {
 
 export const config = {
   discordToken: process.env.DISCORD_TOKEN,
+  commandUserIds: parseCommandUserIds(process.env.COMMAND_USER_IDS),
   aiApiKeys: apiKeys,
   aiApiKey: apiKeys[0],
   aiApiUrl: process.env.AI_API_URL || "https://integrate.api.nvidia.com/v1/chat/completions",
@@ -24,7 +26,7 @@ export const config = {
   personality,
   personalityPath,
   dbPath: process.env.DB_PATH || "memory.db",
-  adminUserIds: new Set((process.env.ADMIN_USER_IDS || "").split(",").map((id) => id.trim()).filter(Boolean)),
+  adminUserIds: new Set((process.env.ADMIN_USER_IDS || process.env.COMMAND_USER_IDS || "").split(",").map((id) => id.trim()).filter(Boolean)),
   prefix: (process.env.BOT_PREFIX || "t").trim(),
   timezone: process.env.TIMEZONE || "Asia/Manila",
   spontaneousChance: Number(process.env.SPONTANEOUS_CHANCE || 0.04),
