@@ -11,7 +11,16 @@ function fixture() {
   const target = member(targetId, 1);
   const calls = [];
   const role = { ...position(2), id: roleId, name: 'Crew', permissions: new PermissionsBitField(), editable: true, managed: false, delete: async () => calls.push(['delete']) };
-  const channel = { id: channelId, guildId: ownerId, permissionsFor: m => m.permissions, isTextBased: () => true, isThread: () => false, send: async data => { calls.push(['send', data]); return { id: '123456789012345678' }; } };
+  const channel = {
+    id: channelId, name: 'general', guildId: ownerId, rateLimitPerUser: 5,
+    permissionsFor: m => m.permissions, isTextBased: () => true, isThread: () => false,
+    edit: async options => {
+      calls.push(['channel_edit', options]);
+      if (options.rateLimitPerUser !== undefined) channel.rateLimitPerUser = options.rateLimitPerUser;
+      return channel;
+    },
+    send: async data => { calls.push(['send', data]); return { id: '123456789012345678' }; },
+  };
   target.roles.add = async r => calls.push(['role_add', r.id]);
   target.bannable = true;
   target.ban = async options => calls.push(['ban', options]);
@@ -47,6 +56,7 @@ test('requires explicit Capri address, mention, or t do', () => {
 test('allowlisted users can phrase clear action requests casually without addressing Capri', () => {
   assert.equal(isActionRequest({ content: 'Create a role named Crew' }, 't', true), true);
   assert.equal(isActionRequest({ content: 'Could you rename the server to Night City?' }, 't', true), true);
+  assert.equal(isActionRequest({ content: 'Try removing slowmode' }, 't', true), true);
   assert.equal(isActionRequest({ content: 'Bet, running it again—add sprite to brochacho.' }, 't', true), true);
   assert.equal(isActionRequest({ content: 'How do I create a role?' }, 't', true), false);
   assert.equal(isActionRequest({ content: 'Please do not delete that channel' }, 't', true), false);
@@ -83,6 +93,19 @@ test('does not trust a planner-generated member ID absent from the request', asy
     /won’t infer a member ID from a name/,
   );
   assert.deepEqual(f.calls, []);
+});
+test('slowmode changes are reported only after a fresh Discord readback', async () => {
+  const f = fixture();
+  const result = await executeStep(f.message, step('channel_edit', { channel: channelId, slowmode: 0 }));
+  assert.equal(f.channel.rateLimitPerUser, 0);
+  assert.match(result, /Slowmode removed and verified/);
+
+  const stale = fixture();
+  stale.channel.edit = async options => stale.calls.push(['channel_edit', options]);
+  await assert.rejects(
+    executeStep(stale.message, step('channel_edit', { channel: channelId, slowmode: 0 })),
+    /Slowmode verification failed/,
+  );
 });
 test('resolves an exact cached member name, but never guesses when there is no match', async () => {
   const f = fixture();
@@ -270,6 +293,41 @@ test('casually prefaced role assignments still execute immediately', async () =>
   assert.equal(await handle(f.message), true);
   assert.deepEqual(f.calls.map(call => call[0]), ['role_add']);
   assert.equal(replies.length, 1);
+});
+for (const followup of [
+  'its still here tho try removing it again',
+  'no, check again',
+  'it is not gone just do it',
+]) test(`retries a clear slowmode follow-up as an action: ${followup}`, async () => {
+  const f = fixture(); const replies = [];
+  f.message.content = followup;
+  f.message.reply = async data => { assert.equal(data.components, undefined); replies.push(data); return {}; };
+  let plannerInput;
+  const handle = createActionHandler({
+    allowedUserIds: new Set([actorId]),
+    getRecentContext: () => '3stargragas: remove slowmode in #general\nCapri: It is gone. I removed it earlier.',
+    completeAI: async ({ messages }) => {
+      plannerInput = JSON.parse(messages.at(-1).content);
+      return JSON.stringify(plan(step('channel_edit', { channel: channelId, slowmode: 0 })));
+    },
+  });
+  assert.equal(await handle(f.message), true);
+  assert.match(plannerInput.context.recentConversation, /remove slowmode/);
+  assert.equal(f.channel.rateLimitPerUser, 0);
+  assert.match(replies[0].content, /Slowmode removed and verified/);
+});
+test('a follow-up without a recent action asks what to retry', async () => {
+  const f = fixture(); const replies = [];
+  f.message.content = 'no, check again';
+  f.message.reply = async data => { replies.push(data); return {}; };
+  const handle = createActionHandler({
+    allowedUserIds: new Set([actorId]),
+    getRecentContext: () => '',
+    completeAI: async () => { throw new Error('planner must not run'); },
+  });
+  assert.equal(await handle(f.message), true);
+  assert.match(replies[0].content, /couldn’t find a recent action/);
+  assert.equal(f.calls.length, 0);
 });
 test('a planner chat fallback cannot claim a direct action is waiting for confirmation', async () => {
   const f = fixture(); const replies = [];

@@ -3,7 +3,7 @@ import "dotenv/config";
 import { Client, Events, GatewayIntentBits, Options, Partials } from "discord.js";
 import { config, validateConfig } from "./config.js";
 import { canRunCommands, COMMAND_DENIED } from "./command-auth.js";
-import { createActionHandler, confirmDeletion } from "./actions.js";
+import { createActionHandler, confirmDeletion, isActionRequest } from "./actions.js";
 import { parseCommand } from "./commands.js";
 import { askAI, completeAI } from "./ai.js";
 import { searchWeb } from "./search.js";
@@ -558,6 +558,24 @@ function recentChannelLines(channelId, limit = 8) {
     WHERE channel_id = ? ORDER BY id DESC LIMIT ?
   `).all(channelId, limit).reverse();
   return rows.map((row) => row.is_bot ? `${row.author_name} [bot]: ${row.content}` : `${row.author_name}: ${row.content}`).join("\n");
+}
+
+function recentActionContext(message) {
+  const rows = memoryDb.prepare(`
+    SELECT author_id, author_name, content, is_bot FROM messages
+    WHERE channel_id = ? AND (author_id = ? OR author_id = ?) AND created_at >= ?
+    ORDER BY id DESC LIMIT 12
+  `).all(message.channel.id, message.author.id, client.user.id, Date.now() - 10 * 60_000).reverse();
+  let actionIndex = -1;
+  rows.forEach((row, index) => {
+    if (row.author_id === message.author.id && !row.is_bot && isActionRequest({ content: row.content }, config.prefix, true)) {
+      actionIndex = index;
+    }
+  });
+  if (actionIndex < 0 || !rows.slice(actionIndex + 1).some(row => row.author_id === client.user.id)) return "";
+  return rows.slice(actionIndex).map(row =>
+    row.author_id === client.user.id ? `Capri: ${row.content}` : `${row.author_name}: ${row.content}`,
+  ).join("\n");
 }
 
 // One line per person describing her bond with them — the compact form
@@ -1151,6 +1169,7 @@ const handleActions = createActionHandler({
   enabled: process.env.DISCORD_ACTIONS_ENABLED !== "false",
   prefix: config.prefix,
   allowedUserIds: config.commandUserIds,
+  getRecentContext: recentActionContext,
   onRequest: rememberActionRequest,
   onReply: rememberActionReply,
 });
