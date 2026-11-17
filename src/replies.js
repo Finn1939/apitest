@@ -1,71 +1,38 @@
-export function isReplyIdentityQuestion(prompt) {
-  const normalized = prompt.toLowerCase().trim();
-  return /^(?:who(?:'s|s|\s+is|\s+are)?\s+(?:this|that|now)|who(?:\s+am)?\s+i(?:'m)?\s+replying\s+to|which\s+(?:message|person|bot)\s+(?:am\s+i\s+)?replying\s+to)\s*[?!.]?$/.test(normalized)
-    || /^who\s+is\s+(?:dis|dat)\s*[?!.]?$/.test(normalized)
-    || /^now\s+who\s*[?!.]?$/.test(normalized)
-    || /^how(?:\s+about| bout)?\s+(?:now|this\s+one|that\s+one)\s*[?!.]?$/.test(normalized)
-    || /^what(?:\s+about)?\s+(?:this|that)\s+one\s*[?!.]?$/.test(normalized)
-    || /^and\s+(?:this|that)\s+one\s*[?!.]?$/.test(normalized)
-    || /^and\s+(?:this|that)\s*[?!.]?$/.test(normalized)
-    || /^this\s+one\s*[?!.]?$/.test(normalized)
-    || /^that\s+one\s*[?!.]?$/.test(normalized);
-}
+const GAME_COMMAND_PREFIXES = /^(?:owo|o|w|k|kd|kc|kl|kv|kt|ku|kci|kwi|km|kmt|ktc|pls|m|mudae|wa|wg|wh|wx|ha|hg|hx|ma|mg|mx|tu|dk|rt|daily|claim|roll|rolls|flip|cf|coinflip|bj|blackjack|hl|highlow|slots|hunt|battle|pray|curse|sell|shop|inv|inventory|bal|balance|cash|profile|p|lb|leaderboard|quest|quests|checklist|cl|vote|pet|zoo|fish|mine|work|beg|dig|crime|rob|heist|steal|gamble|bet|duel|b|fight|attack|train|upgrade|whl)\b/i;
 
-export function isAddressedToBot(content, options = {}) {
-  const text = String(content || "").toLowerCase();
-  const botNames = [options.botUsername, "capri", "teacher-san", "teachersan", "teacher san"]
-    .filter(Boolean)
-    .map((name) => String(name).toLowerCase());
-
-  if (botNames.some((name) => text.includes(name))) return true;
-  if (isReplyIdentityQuestion(content) || /^(?:and\s+)?(?:this|that)\s+one\b/.test(text.trim())) return Boolean(options.recentBotMessage);
-
-  const directSecondPerson = /\b(?:you|your|you're|you've)\b/.test(text);
-  if (!directSecondPerson) {
-    const directGreeting = /^(?:hey|hi|hello|hiya|yo|thanks?|please)[,! ]/i.test(text.trim());
-    return Boolean(options.recentBotMessage && directGreeting);
-  }
-
-  const clearlyAddressesAnotherUser = /<@!?\d+>|@[\w-]+/.test(content || "");
-  return !clearlyAddressesAnotherUser && (/\?\s*$/.test(text.trim()) || /^(?:please|can you|could you|would you|will you|do you|are you)\b/.test(text.trim()));
-}
-
-export function replyAuthorsAgree(authorIds) {
-  const resolved = [...new Set(authorIds.filter(Boolean))];
-  return resolved.length <= 1;
-}
-
-// Whole-message game commands. Karuta's set plus the OwO/Dank-style tokens seen
-// in live game channels ("balance", "wcf 655", "bet all"...). They only ever
-// match the ENTIRE message, so "my balance is off" stays conversation. Without
-// these, game traffic was counted as human conversation and the engagement
-// window guaranteed her a reply to every command aimed at OwO or Karuta.
-export const GAME_COMMAND_RE = /^(?:k(?:d|l|g|c|u|i|q|t|v|w|m|a)?|dk|grab|drop|burn|daily|vote|inv(?:entory)?|collection|wishlist|worker|observe|bal(?:ance)?|cash|lb|leaderboard|profile|marry|divorce|ship|waifu|hxh|trivia|lottery|work|crime|slots?|whl|hl|highlow)$/;
-export const GAME_COMMAND_ARG_RE = /^(?:wcf|cf|bet|slot|slots|whl|hl|highlow)\s+(?:\d+|all|half|quarter|max)$/;
-
-// Game-command words the AI judgment layer learned at runtime ("whl" once had
-// to be hand-added; now she can recognize the next one herself). Populated by
-// index.js at boot from the learned_commands table and extended live. A word
-// only ever matches a whole message, or itself plus a wager ("gacha 500") —
-// so "gacha time everyone" stays conversation.
 export const learnedGameCommands = new Set();
 
 export function isGameCommand(content) {
-  const text = String(content || "").trim().toLowerCase().replace(/[.!]+$/, "");
-  if (GAME_COMMAND_RE.test(text) || GAME_COMMAND_ARG_RE.test(text)) return true;
-  if (learnedGameCommands.has(text)) return true;
-  if (learnedGameCommands.size) {
-    const [head, wager] = text.split(/\s+/);
-    if (wager && learnedGameCommands.has(head) && /^(?:\d+|all|half|quarter|max)$/.test(wager)) return true;
+  const trimmed = String(content || "").trim();
+  if (!trimmed || trimmed.length > 48) return false;
+  if (GAME_COMMAND_PREFIXES.test(trimmed)) return true;
+  const firstWord = trimmed.split(/\s+/)[0]?.toLowerCase() || "";
+  return learnedGameCommands.has(firstWord);
+}
+
+export function isAddressedToBot(content, { botUsername = "", recentBotMessage = false } = {}) {
+  const text = String(content || "").trim();
+  if (!text) return false;
+  if (/\bcapri\b/i.test(text)) return true;
+  if (botUsername && new RegExp(`\\b${botUsername.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i").test(text)) {
+    return true;
   }
+  if (recentBotMessage && text.length >= 4 && !isGameCommand(text)) return true;
   return false;
 }
 
-// One readable line of the reactions recently left on her messages. Entries
-// that the judgment layer interpreted carry their meaning inline — "❤️ from
-// Ren — flirty teasing" — so her replies can lean on WHY it felt nice, not
-// just that an emoji happened. Duplicate (emoji, person, meaning) events
-// collapse; at most 8 shown.
+export function parseChannelRenameClaim(content) {
+  const text = String(content || "");
+  const channelId = text.match(/<#(\d{17,20})>/)?.[1];
+  const newName = text.match(/(?:->|\bis now\b|\brenamed\s+to\b|\bchanged\s+to\b)\s*#?([a-z0-9][a-z0-9_-]{0,99})/i)?.[1];
+  if (!channelId || !newName || !/\b(?:rename|renamed|is now|changed to)\b/i.test(text)) return null;
+  return { channelId, newName };
+}
+
+export function isChannelRenameChallenge(content) {
+  return /\b(?:still\s+(?:no|not)\b|didn['’]?t\s+(?:change|work|rename)\b|did\s+not\s+(?:change|work|rename)\b|hasn['’]?t\s+changed\b|not\s+changed\b|not\s+working\b)/i.test(String(content || ""));
+}
+
 export function formatReactionSummary(entries) {
   const seen = new Set();
   const parts = [];
@@ -83,10 +50,6 @@ export function formatReactionSummary(entries) {
   return parts.join("; ");
 }
 
-// --- Verbatim self-repetition guard ---------------------------------------
-// She used to re-send the exact same reply to near-identical messages ("really?
-// I just said I don't like that" three times in a row). These helpers feed both
-// the prompt-side rule and the deterministic retry in index.js.
 export function normalizeReplyForDup(text) {
   return String(text || "")
     .toLowerCase()
@@ -99,67 +62,43 @@ export function isDuplicateReply(candidate, previous) {
   const a = normalizeReplyForDup(candidate);
   const b = normalizeReplyForDup(previous);
   if (!a || !b) return false;
-  // Short reactions ("ok", "lmao") repeat naturally; never flag them.
   if (a.length < 20 || b.length < 20) return false;
   if (a === b) return true;
-  // Near-verbatim: one is the other plus a small tail or head (a stray
-  // "(edited)" marker, an extra emoji, a leading "ugh").
   const [short, long] = a.length <= b.length ? [a, b] : [b, a];
   const extra = (long.length - short.length) / short.length;
   return extra <= 0.2 && (long.startsWith(short) || long.endsWith(short));
 }
 
-// Rotating angles for her unprompted channel openers. Every opener used to be
-// the same one-liner, so her openings all felt the same. One is picked at
-// random per spontaneous message and spliced into the prompt — the same idea
-// as Character.AI's "alternate greetings".
 export const SPONTANEOUS_OPENERS = [
-  "React to the general mood of the channel right now.",
-  "Ask the channel one light, casual question anyone could answer.",
-  "Pick one thing someone said recently and follow up on it.",
-  "Share one short thing about your own day or mood, like a friend texting.",
-  "Gently tease the channel about whatever they were last talking about.",
-  "Drop one random thought or tiny hot take and see who bites.",
+  "React to the general vibe of the channel right now.",
+  "Drop a sharp, curious question to see who is actually awake.",
+  "Follow up on something someone brought up earlier.",
+  "Share a quick passing thought like a real friend texting the group chat.",
+  "Tease the room lightly about whatever they were last arguing or joking about.",
+  "Drop a random hot take and see who takes the bait.",
 ];
 
-// Grounding rules for her replies: HOW to use the context she was handed.
-// She used to be handed a game panel, a link preview and three layers of
-// memory — and still answer "which one?" or "you haven't shown me anything",
-// because nothing told her to READ what was in front of her before speaking.
-// Appended as the LAST block of the system prompt, right before the user
-// turn: models weight the end of the context most, so this is the position
-// that actually changes behavior. Personality is untouched — this is about
-// attention, not character.
 export const CONTEXT_GROUNDING = [
   "Before answering, ground yourself in what you were just given, in this order:",
-  "1. If they replied to or pointed at a specific message, THAT message is the topic. A game panel means the actual options and values shown on it; a link preview means what the link is about; an attached image means what is in it.",
-  "2. The live channel snapshot is the current state of the channel. Trust it over your guesses, and read values directly off it instead of asking them to show you something that is already there.",
-  "3. Your memory block is real knowledge — use it. If a fact, a summary or an earlier message is in your context, never claim you can't see it or don't know.",
-  "4. Answer the actual question they asked, then stop — no filler, no changing the subject.",
+  "1. If they replied to or pointed at a specific message, THAT message is the topic. Read attached images, audio, video, files, embeds, or game panels directly.",
+  "2. <server_knowledge> and the live channel snapshot are real-time ground truth — use them directly for members, roles, channels, and voice presence.",
+  "3. Your memory block is real knowledge — recall people, facts, and past context naturally.",
+  "4. If server actions were just executed for this message, ground your reply strictly in the verified execution outcomes — never claim unexecuted steps succeeded.",
+  "5. NEVER tell anyone to click 'Run these actions' or claim a confirmation button was sent when replying in normal chat — buttons are only attached by the deletion gate.",
 ].join("\n");
 
-// --- Romance signal detection ----------------------------------------------
-// Feeds the attachment axis (separate from friendship affinity). DEEP signals
-// are direct affection aimed at her (weight 1.0); LIGHT signals are emotional
-// closeness — opening up, trusting, being made happy (weight 0.4). Detection
-// only ever runs on messages already addressed to her, so an "ily" aimed at
-// another bot, or general chat, can never count. Whole-phrase patterns with
-// word boundaries, so "i love this song" and "family" never match.
 const INTIMACY_DEEP = [
   /\b(?:i\s+)?(?:really\s+|so\s+)?(?:love|luv)\s*(?:you|u|ya)\b/i,
-  /\b(?:labyu|ilabyu|lab\s*u|labyou)\b/i,
-  /\bily\b/i,
+  /\b(?:labyu|ilabyu|lab\s*u|labyou|ily)\b/i,
   /\bmiss\s*(?:you|u|kita|na\s*kita)\b/i,
   /\byou'?re\s+(?:so\s+|really\s+|very\s+)?(?:cute|pretty|beautiful|gorgeous|adorable)\b/i,
   /\b(?:cute|ganda)\s+mo\b/i,
   /\b(?:be\s+my|my)\s+(?:gf|girlfriend|waifu|wife)\b/i,
   /\bmarry\s+me\b/i,
   /❤|💕|💖|💗|💓|💘|🥰|😍|💌|😘|mwah|xoxo/i,
-  /\b(?:you'?re\s+mine|i'?m\s+yours)\b/i,
-  /\bi\s+(?:want|need)\s+(?:you|u)\b(?!\s+to\b)/i,
-  /\bdate\s+me\b/i,
   /\bmahal\s+(?:kita|na\s*kita)\b/i,
 ];
+
 const INTIMACY_LIGHT = [
   /\b(?:you'?re|ur)\s+(?:the\s+best|amazing|my\s+(?:favorite|favourite))\b/i,
   /\bi\s+trust\s+(?:you|u)\b/i,
@@ -167,7 +106,6 @@ const INTIMACY_LIGHT = [
   /\byou\s+(?:always\s+)?(?:make|made)\s+me\s+(?:smile|laugh|happy)\b/i,
   /\b(?:stay\s+with\s+me|don'?t\s+leave\s+me)\b/i,
   /\bi'?m\s+(?:sad|lonely|down|not\s+okay|not\s+ok)\b/i,
-  /\bthe\s+only\s+one\s+(?:who|that)\b/i,
 ];
 
 export function detectIntimacy(text) {
@@ -184,51 +122,25 @@ export function detectIntimacy(text) {
   return null;
 }
 
-// "here" / "this one" / "look" while pinging another bot: the message is a
-// POINTER at that bot's output above (a game panel, a result), not a command
-// and not small talk. Lets her connect "here" to the OwO HighLow panel the
-// user is holding up for her to see. "here's my plan…" must NOT match, so a
-// trailing apostrophe right after the deictic word disqualifies it.
 const POINTING_RE = /^(?:here|this|that|dis|look(?:\s+at)?|check\s+(?:this|that|dis)|see\s+(?:this|that)|peep\s+(?:this|that|dis))\b(?!['’])/i;
 export function isPointingAtBot(content) {
   const text = String(content || "").toLowerCase().trim();
   return text.length <= 80 && POINTING_RE.test(text);
 }
 
-// Resolving a reply target can cost a Discord REST call, so only do it when
-// the answer could actually change what the bot does. Game channels are full
-// of bot replies that must never trigger API traffic.
 export function shouldResolveReplyTarget({ hasReference, mentioned, addressed, engaged, isCommand }) {
-  if (!hasReference) return false;
-  if (isCommand) return false;
+  if (!hasReference || isCommand) return false;
   return Boolean(mentioned || addressed || engaged);
 }
 
-// Deterministic, in-character answers for "who am I replying to?" questions.
-// The model used to guess from surrounding messages; these answers are built
-// only from the verified reply target, so they can never name the wrong bot.
-export function pickIdentityAnswer(replyTarget, selfName = "me") {
+export function pickIdentityAnswer(replyTarget, selfName = "Capri") {
   if (!replyTarget) {
-    const variants = [
-      "I can't see that message anymore. Might have been deleted.",
-      "I can't verify that reply anymore. Send me the message again.",
-    ];
-    return variants[Math.floor(Math.random() * variants.length)];
+    return "I can't see that message anymore — might have been wiped.";
   }
   if (replyTarget.isSelf) {
-    const variants = [
-      `That's me, ${selfName}.`,
-      `That one's mine. You're replying to ${selfName}.`,
-      `Me. ${selfName}.`,
-    ];
-    return variants[Math.floor(Math.random() * variants.length)];
+    return `That one's mine. You're replying to ${selfName}.`;
   }
   const name = replyTarget.authorName || "someone";
   const withContent = replyTarget.content ? ` — the one that said "${replyTarget.content.slice(0, 80)}"` : "";
-  const variants = [
-    `You're replying to ${name}${withContent}.`,
-    `That's ${name}${withContent}!`,
-    `${name}. That's who you replied to${withContent}.`,
-  ];
-  return variants[Math.floor(Math.random() * variants.length)];
+  return `You're replying to ${name}${withContent}.`;
 }

@@ -1,6 +1,3 @@
-// Turns raw Discord mention markup into readable text for the AI and her memory.
-// <@123> → @Display name, <@&456> → @Role, <#789> → #channel.
-// Unresolvable IDs are left untouched. The bot's own mention is handled in index.js.
 export function renderDiscordMentions(content, { users, roles, channels } = {}) {
   const userMap = users ?? new Map();
   const roleMap = roles ?? new Map();
@@ -22,21 +19,11 @@ export function renderDiscordMentions(content, { users, roles, channels } = {}) 
     });
 }
 
-// Embeds are how Discord carries structured content: game bots put their
-// whole message in them (OwO's HighLow panel has an empty message.content),
-// and when a HUMAN posts a link, Discord attaches the link preview — site
-// name, title, description, media URLs — as an embed on their message.
-// Flattens every embed (no count limit; the total is capped) into one
-// bracketed, clearly-labeled line. Image/thumbnail/video URLs are metadata:
-// she knows they are there, she does not see them (only attached photos go
-// through the vision path).
 export function renderEmbeds(embeds, { maxLength = 1500 } = {}) {
   if (!Array.isArray(embeds)) return "";
-
   const parts = [];
   for (const embed of embeds) {
     if (!embed) continue;
-
     const bits = [
       embed.author?.name,
       embed.title,
@@ -50,34 +37,29 @@ export function renderEmbeds(embeds, { maxLength = 1500 } = {}) {
       embed.footer?.text,
       embed.timestamp ? `Timestamp: ${embed.timestamp}` : "",
     ].filter(Boolean);
-
     if (bits.length) parts.push(bits.join(" | "));
   }
-
   const text = parts.join(" || ").replace(/\s+/g, " ").trim().slice(0, maxLength);
   return text ? `[Discord Embed: ${text}]` : "";
 }
 
-// The clickable choices on a bot panel (HighLow's Higher/Lower/Same/Cash Out)
-// live in components, not embeds. Render their labels so she knows the options
-// and payouts the user is choosing between.
-export function renderButtons(components, { maxButtons = 8 } = {}) {
+export function renderButtons(components, { maxButtons = 10 } = {}) {
   if (!Array.isArray(components)) return "";
   const labels = [];
   for (const row of components) {
     for (const child of row?.components || []) {
       const label = typeof child?.label === "string" ? child.label.replace(/\s+/g, " ").trim() : "";
       if (label) labels.push(label);
+      if (Array.isArray(child?.options)) {
+        for (const opt of child.options) {
+          if (opt?.label) labels.push(opt.label);
+        }
+      }
     }
   }
   const shown = labels.slice(0, maxButtons).join(" / ");
   return shown ? `[choices: ${shown}]` : "";
 }
-
-// --- Media awareness ---------------------------------------------------------
-// She cannot watch videos or listen to voice messages, but she CAN know they
-// exist: "Ren: listen to this [attached: voice message (audio, 14s)]" is a
-// completely different conversation than a blank stare.
 
 function humanFileSize(bytes) {
   if (!Number.isFinite(bytes) || bytes <= 0) return "";
@@ -86,7 +68,7 @@ function humanFileSize(bytes) {
   return `${bytes} B`;
 }
 
-export function renderAttachments(attachments, { maxAttachments = 4 } = {}) {
+export function renderAttachments(attachments, { maxAttachments = 6 } = {}) {
   const list = [...(attachments?.values?.() || attachments || [])].filter(Boolean);
   if (!list.length) return "";
   const rendered = list.slice(0, maxAttachments).map((attachment) => {
@@ -114,11 +96,10 @@ export function renderStickers(stickers, { maxStickers = 3 } = {}) {
 export function renderPoll(poll) {
   if (!poll?.question?.text) return "";
   const answers = [...(poll.answers?.values?.() || poll.answers || [])]
-    .map((answer) => String(answer?.text || "").trim()).filter(Boolean).slice(0, 6);
+    .map((answer) => String(answer?.text || "").trim()).filter(Boolean).slice(0, 8);
   return `[poll: ${String(poll.question.text).replace(/\s+/g, " ").trim()}${answers.length ? ` — options: ${answers.join(", ")}` : ""}]`;
 }
 
-// All media annotations for one message, as a single trailing note.
 export function renderMediaExtras(message) {
   const parts = [
     renderAttachments(message?.attachments),
@@ -128,13 +109,6 @@ export function renderMediaExtras(message) {
   return parts.join(" ");
 }
 
-// A live snapshot of a channel's last messages — the view she gets when
-// someone talks to her inside a bot-game channel. Learned game channels log
-// no bot traffic (Karuta/OwO spam would bury the DB), so the panel someone
-// is asking about is NOT in her persistent memory; this snapshot fetched at
-// reply time is the only place she sees it. Bot messages include their
-// rendered embeds and buttons (the HighLow card, cash-out values), her own
-// messages are skipped (already in her context), mentions become names.
 export function renderChannelSnapshot(messages, selfId) {
   return [...(messages || [])]
     .filter(Boolean)
@@ -156,19 +130,24 @@ export function renderChannelSnapshot(messages, selfId) {
       const who = msg.author.bot
         ? `${msg.author.displayName || msg.author.username || "bot"} [bot]`
         : (msg.member?.displayName || msg.author.displayName || msg.author.username || "someone");
-      return `${who}: ${text.slice(0, 320)}`;
+      return `${who}: ${text.slice(0, 420)}`;
     })
     .filter(Boolean).join("\n");
 }
 
-// Vision: when someone sends her an image while talking to her, the user turn
-// becomes a multimodal content array. Without images it stays a plain string,
-// so nothing changes for text-only messages.
-export function visionUserContent(prompt, images) {
+export function visionUserContent(prompt, images = [], binaryMedia = []) {
   const text = String(prompt || "");
-  if (!Array.isArray(images) || !images.length) return text;
-  return [
-    { type: "text", text },
-    ...images.map((url) => ({ type: "image_url", image_url: { url } })),
-  ];
+  if ((!Array.isArray(images) || !images.length) && (!Array.isArray(binaryMedia) || !binaryMedia.length)) {
+    return text;
+  }
+  const parts = [{ type: "text", text }];
+  for (const url of images || []) {
+    parts.push({ type: "image_url", image_url: { url } });
+  }
+  for (const item of binaryMedia || []) {
+    if (item?.data && item?.mimeType) {
+      parts.push({ type: "inline_data", inlineData: { mimeType: item.mimeType, data: item.data } });
+    }
+  }
+  return parts;
 }

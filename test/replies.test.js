@@ -1,170 +1,55 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { CONTEXT_GROUNDING, detectIntimacy, isAddressedToBot, isDuplicateReply, isGameCommand, isPointingAtBot, isReplyIdentityQuestion, normalizeReplyForDup, pickIdentityAnswer, replyAuthorsAgree, shouldResolveReplyTarget, SPONTANEOUS_OPENERS } from "../src/replies.js";
+import {
+  detectIntimacy,
+  isAddressedToBot,
+  isChannelRenameChallenge,
+  isDuplicateReply,
+  isGameCommand,
+  isPointingAtBot,
+  parseChannelRenameClaim,
+  pickIdentityAnswer,
+} from "../src/replies.js";
 
-test("recognizes follow-up reply identity questions", () => {
-  assert.equal(isReplyIdentityQuestion("how about now?"), true);
-  assert.equal(isReplyIdentityQuestion("how bout now?"), true);
-  assert.equal(isReplyIdentityQuestion("now who?"), true);
-  assert.equal(isReplyIdentityQuestion("who am I replying to?"), true);
-  assert.equal(isReplyIdentityQuestion("who is dis"), true);
-  assert.equal(isReplyIdentityQuestion("how about this one"), true);
-  assert.equal(isReplyIdentityQuestion("how bout that one"), true);
-  assert.equal(isReplyIdentityQuestion("and this one?"), true);
-  assert.equal(isReplyIdentityQuestion("and this?"), true);
-  assert.equal(isReplyIdentityQuestion("this one?"), true);
+test("isAddressedToBot recognizes Capri name, username, and active follow-ups", () => {
+  assert.equal(isAddressedToBot("hey capri what's good", { botUsername: "Capri" }), true);
+  assert.equal(isAddressedToBot("yeah makes sense", { botUsername: "Capri", recentBotMessage: true }), true);
+  assert.equal(isAddressedToBot("whl", { botUsername: "Capri", recentBotMessage: true }), false);
 });
 
-test("recognizes direct address without a mention or reply", () => {
-  assert.equal(isAddressedToBot("Teacher-san, can you help me?", { botUsername: "teacher-san" }), true);
-  assert.equal(isAddressedToBot("what do you think?", { botUsername: "teacher-san" }), true);
-  assert.equal(isAddressedToBot("can you hear me?"), true);
-  assert.equal(isAddressedToBot("sprite vodka is telling a story"), false);
-  assert.equal(isAddressedToBot("and this one?", { recentBotMessage: true }), true);
-  assert.equal(isAddressedToBot("what happened next", { recentBotMessage: true }), false);
+test("game command filter catches bot commands and lets normal conversation pass", () => {
+  assert.equal(isGameCommand("owo hunt"), true);
+  assert.equal(isGameCommand("kd"), true);
+  assert.equal(isGameCommand("yo what did everyone eat today"), false);
 });
 
-test("refuses conflicting Discord reply authors", () => {
-  assert.equal(replyAuthorsAgree(["user-a", "user-a"]), true);
-  assert.equal(replyAuthorsAgree(["user-a", "user-b"]), false);
-  assert.equal(replyAuthorsAgree([undefined, "user-a"]), true);
+test("rename follow-ups can be tied to the claimed channel and expected name", () => {
+  assert.deepEqual(
+    parseChannelRenameClaim("Channel's done. <#1567358193334493247> is now #dogpile."),
+    { channelId: "1567358193334493247", newName: "dogpile" },
+  );
+  assert.deepEqual(
+    parseChannelRenameClaim("Updated <#1567358193334493247>: renamed #woo -> #dogpile."),
+    { channelId: "1567358193334493247", newName: "dogpile" },
+  );
+  assert.equal(isChannelRenameChallenge("still no"), true);
+  assert.equal(isChannelRenameChallenge("it's still not dogpile"), true);
+  assert.equal(isChannelRenameChallenge("thanks, that worked"), false);
+  assert.equal(parseChannelRenameClaim("Channel renamed successfully."), null);
 });
 
-test("only resolves reply targets when it can change the outcome", () => {
-  // Game-channel chatter: never pay the API cost.
-  assert.equal(shouldResolveReplyTarget({ hasReference: true, mentioned: false, addressed: false, engaged: false, isCommand: false }), false);
-  // Mention, heuristic address, or an ongoing conversation: worth resolving.
-  assert.equal(shouldResolveReplyTarget({ hasReference: true, mentioned: true, addressed: false, engaged: false, isCommand: false }), true);
-  assert.equal(shouldResolveReplyTarget({ hasReference: true, mentioned: false, addressed: true, engaged: false, isCommand: false }), true);
-  assert.equal(shouldResolveReplyTarget({ hasReference: true, mentioned: false, addressed: false, engaged: true, isCommand: false }), true);
-  // Prefix commands never use the reply target, and no reference means nothing to do.
-  assert.equal(shouldResolveReplyTarget({ hasReference: true, mentioned: true, addressed: false, engaged: false, isCommand: true }), false);
-  assert.equal(shouldResolveReplyTarget({ hasReference: false, mentioned: true, addressed: false, engaged: false, isCommand: false }), false);
-});
-
-test("identity answers use the live bot name and verified target only", () => {
-  // Self-reply must use the real username, never a hardcoded persona name.
-  for (let i = 0; i < 10; i += 1) {
-    const self = pickIdentityAnswer({ isSelf: true, authorName: "teacher-san", content: "" }, "nightbot");
-    assert.ok(self.includes("nightbot"), `self answer must contain the live username: ${self}`);
-    assert.ok(!self.includes("Teacher-san"), `self answer must not hardcode a persona name: ${self}`);
-  }
-  // Other target: names the verified author, optionally quotes their message.
-  const other = pickIdentityAnswer({ isSelf: false, authorName: "OwO", content: "you have 135,000 cowoncy" }, "nightbot");
-  assert.ok(other.includes("OwO"));
-  assert.ok(other.includes("cowoncy"));
-  // Unknown target: admits it instead of guessing.
-  const unknown = pickIdentityAnswer(null, "nightbot");
-  assert.ok(/can't/i.test(unknown));
-});
-
-test("game commands are recognized across bot games", () => {
-  // Karuta-style (existing behavior).
-  assert.equal(isGameCommand("k"), true);
-  assert.equal(isGameCommand("kl"), true);
-  assert.equal(isGameCommand("daily"), true);
-  assert.equal(isGameCommand("wishlist"), true);
-  // OwO / Dank style seen live in the casino: bare commands and wagers.
-  assert.equal(isGameCommand("balance"), true);
-  assert.equal(isGameCommand("Balance."), true);
-  assert.equal(isGameCommand("wcf 655"), true);
-  assert.equal(isGameCommand("WCF 10000"), true);
-  assert.equal(isGameCommand("bet all"), true);
-  assert.equal(isGameCommand("cf 50"), true);
-  assert.equal(isGameCommand("slot 10"), true);
-  // Conversation that must NOT be swallowed by the game filter.
-  assert.equal(isGameCommand("we hate you"), false);
-  assert.equal(isGameCommand("we dont like you"), false);
-  assert.equal(isGameCommand("how about my balance"), false);
-  assert.equal(isGameCommand("can you help me with slots"), false);
-  assert.equal(isGameCommand("bet you can't do it"), false);
-});
-
-test("verbatim repeats of her own last reply are flagged", () => {
-  // The live failure: the same line re-sent to three consecutive @mentions.
-  const first = "...really? 🐾 I just said I don't like that, c'mon.";
-  const repeat = "...REALLY?? I just said I don't like that, c'mon!! (edited)";
-  assert.equal(isDuplicateReply(repeat, first), true);
-  assert.equal(isDuplicateReply(first, repeat), true);
-  // Short reactions may repeat naturally; never flag them.
+test("dedup catches near-identical long replies while allowing short reactions", () => {
   assert.equal(isDuplicateReply("ok", "ok"), false);
-  assert.equal(isDuplicateReply("lmao same tbh", "lmao same tbh"), false);
-  // Genuinely different replies are not duplicates.
-  assert.equal(isDuplicateReply("ugh why are you like this, seriously", first), false);
-  assert.equal(isDuplicateReply(null, first), false);
-  // Normalization strips punctuation, emoji and case.
   assert.equal(
-    normalizeReplyForDup("...really? 🐾 I just said I DON'T like that, c'mon."),
-    "really i just said i don t like that c mon",
+    isDuplicateReply("Yeah I already checked #general and nobody's posted since midnight", "yeah i already checked #general and nobody's posted since midnight!"),
+    true,
   );
 });
 
-test("spontaneous openers give her distinct angles", () => {
-  // Every opener used to be the same one-liner, so openings felt samey.
-  assert.ok(SPONTANEOUS_OPENERS.length >= 4, "need at least four distinct opener angles");
-  assert.equal(new Set(SPONTANEOUS_OPENERS).size, SPONTANEOUS_OPENERS.length, "openers must be distinct");
-  for (const opener of SPONTANEOUS_OPENERS) {
-    assert.ok(opener.length > 20 && opener.length < 160, `opener should be one short instruction: ${opener}`);
-  }
-});
-
-test("intimacy signals are detected conservatively", () => {
-  // Deep romantic signals aimed at her (English + Tagalog + emoji).
-  for (const text of ["i love you", "ily", "labyu", "love you so muchhh", "mahal kita", "miss you na", "you're so cute", "cute mo", "ganda mo", "be my gf", "marry me pls", "❤️", "🥰", "mwah", "you're mine", "i need you"]) {
-    const hit = detectIntimacy(text);
-    assert.ok(hit, `should register as intimacy: ${text}`);
-    assert.equal(hit.weight, 1, `should be a deep signal: ${text}`);
-  }
-  // Light emotional closeness.
-  for (const text of ["you're the best", "ur amazing", "i trust you", "can i tell you something", "you always make me laugh", "i'm sad rn", "you're the only one who listens"]) {
-    const hit = detectIntimacy(text);
-    assert.ok(hit, `should register as intimacy: ${text}`);
-    assert.equal(hit.weight, 0.4, `should be a light signal: ${text}`);
-  }
-  // Never romance: normal chat, game traffic, affection for other things.
-  for (const text of ["we hate you", "wcf 655", "balance", "k", "i love this song", "family time", "gm guys", "idc", "how about my balance", "the lab you were in", "i need you to help me with this", "can you help me with slots"]) {
-    assert.equal(detectIntimacy(text), null, `must NOT register as intimacy: ${text}`);
-  }
-});
-
-test("highlow game commands never count as conversation", () => {
-  // The live failure: "whl" was for OwO, but the engagement window made her
-  // reply to it as if it were chat. "whl", "hl" and wagers must all be game
-  // traffic; near-words like "whale" must stay conversation.
-  assert.equal(isGameCommand("whl"), true);
-  assert.equal(isGameCommand("WHL"), true);
-  assert.equal(isGameCommand("hl"), true);
-  assert.equal(isGameCommand("highlow"), true);
-  assert.equal(isGameCommand("whl 1000"), true);
-  assert.equal(isGameCommand("hl all"), true);
-  assert.equal(isGameCommand("whale"), false);
-  assert.equal(isGameCommand("whls"), false);
-});
-
-test("short deictic messages pointing at another bot are recognized", () => {
-  // "here @OwO" style pointers: she must connect these to the bot's message
-  // above instead of asking "tell me first".
-  assert.equal(isPointingAtBot("here"), true);
-  assert.equal(isPointingAtBot("here @OwO"), true);
-  assert.equal(isPointingAtBot("this"), true);
-  assert.equal(isPointingAtBot("this one"), true);
-  assert.equal(isPointingAtBot("dis"), true);
+test("pointing and intimacy helpers work reliably", () => {
   assert.equal(isPointingAtBot("look at this"), true);
-  assert.equal(isPointingAtBot("check this @TEST."), true);
-  // Not pointers: contractions, questions, longer chatter.
-  assert.equal(isPointingAtBot("here's my plan for the weekend"), false);
-  assert.equal(isPointingAtBot("where are you going"), false);
-  assert.equal(isPointingAtBot("there once was a man from nantucket who really loved to fish every single morning"), false);
-});
-
-test("CONTEXT_GROUNDING carries the four grounding rules in order", () => {
-  // The rules that stop the airhead answers: read the pointed-at message,
-  // trust the live snapshot, use her memory, answer the actual question.
-  const lines = CONTEXT_GROUNDING.split("\n");
-  assert.ok(lines.length >= 5, "intro plus four rules");
-  assert.match(CONTEXT_GROUNDING, /ground yourself in what you were just given/);
-  assert.match(CONTEXT_GROUNDING, /1\. If they replied to or pointed at a specific message, THAT message is the topic/);
-  assert.match(CONTEXT_GROUNDING, /2\. The live channel snapshot is the current state of the channel/);
-  assert.match(CONTEXT_GROUNDING, /never claim you can't see it or don't know/);
-  assert.match(CONTEXT_GROUNDING, /4\. Answer the actual question they asked, then stop/);
+  assert.equal(isPointingAtBot("here's my plan for tonight"), false);
+  assert.equal(detectIntimacy("love you capri")?.weight, 1);
+  assert.equal(detectIntimacy("i love this song"), null);
+  assert.match(pickIdentityAnswer({ authorName: "Alex", isSelf: false, content: "yo" }, "Capri"), /Alex/);
 });

@@ -1,39 +1,13 @@
 # Environment setup
 
-If upgrading, edit your existing .env. Preserve your tokens, provider settings, DB_PATH and all memory files. Replace personality.txt with the new version (or update the custom file selected by PERSONALITY_PATH). Restart the bot after editing .env.
+For an upgrade, keep your existing `.env`, database, and memory files. Review the current `.env.example` for new options, then restart the bot after changing configuration. Do not replace a custom personality file unless you want to use the included `personality.txt`.
 
-For a new install, copy .env.minimal.example to .env and replace the three placeholders:
+For a new install, copy `.env.minimal.example` to `.env` and set `DISCORD_TOKEN`, `GEMINI_API_KEY` (or an NVIDIA/OpenAI-compatible provider key), and `COMMAND_USER_IDS`. Use numeric Discord user IDs; separate multiple IDs with commas. A blank `COMMAND_USER_IDS` disables server-action commands, but does not disable ordinary chat.
 
-```dotenv
-DISCORD_TOKEN=your_discord_bot_token
-NVIDIA_API_KEY=your_nvidia_api_key
-NVIDIA_API_KEYS=
-COMMAND_USER_IDS=YOUR_DISCORD_USER_ID
-ADMIN_USER_IDS=
-PERSONALITY_PATH=personality.txt
-DISCORD_ACTIONS_ENABLED=true
-REPLY_THINKING=false
-REPLY_TEMPERATURE=0.85
-TIMEZONE=Asia/Manila
-```
+The `.env.example` documents optional provider, autonomy, server-sync, memory, analysis, and generation settings. `AI_PROVIDER=auto` uses Gemini for chat when `GEMINI_API_KEY` is configured; otherwise it uses the NVIDIA/OpenAI-compatible settings. Set `AI_PROVIDER=openai` to force NVIDIA for text chat even when Gemini is configured.
 
-| Setting | What to enter |
-| --- | --- |
-| DISCORD_TOKEN | Your bot token, not a user account token |
-| NVIDIA_API_KEY | Your existing NVIDIA API key |
-| NVIDIA_API_KEYS | Leave empty for one key. If using a pool, comma-separated real keys. This overrides NVIDIA_API_KEY when nonempty; remove old example placeholders. |
-| COMMAND_USER_IDS | Your numeric Discord user ID. Multiple allowed users: comma-separated IDs. Not a username, role ID, server ID, or bot ID. Blank disables all commands while everyone can still chat. Invalid IDs cause a clear startup error. |
-| ADMIN_USER_IDS | Optional narrower allowlist for maintenance commands. Leave blank to use COMMAND_USER_IDS. Adding an ID here alone does not grant command access. |
-| PERSONALITY_PATH | personality.txt, or your custom character file path |
-| DISCORD_ACTIONS_ENABLED | true enables server actions; false disables them |
-| REPLY_THINKING | false reduces chat reasoning latency; it does not make provider/network calls instantaneous |
-| REPLY_TEMPERATURE | 0.85 for more varied chat; action planning remains at temperature 0 |
-| TIMEZONE | Asia/Manila for Philippine time |
+To use **NVIDIA for chat and Fish Audio for Discord voice**, set `AI_PROVIDER=openai`, configure `NVIDIA_API_KEY` (and `AI_API_URL` / `AI_MODEL` if needed), then set `FISH_AUDIO_API_KEY` and `FISH_AUDIO_REFERENCE_ID`. The Python bot streams Discord audio to Fish's realtime transcription API, sends completed user turns to the selected chat provider, and streams Fish TTS audio back into Discord. `FISH_ASR_MODEL` defaults to the preview model `transcribe-stream-1`; `FISH_TTS_MODEL` defaults to `s2.1-pro-free`. Live transcription is billed per session duration according to Fish Audio's plan. Voice is implemented by the Python bot, not the Node bot: install `python/requirements.txt` and run `python python/bot.py`. Stop the Node process first; only one bot process should connect with the same Discord token. In Discord, use `/vc_join`, then talk to Capri or use `/vc_say`; use `/vc_leave` when finished. Never commit or share `.env`.
 
-Keep your working AI_API_URL and AI_MODEL if already configured. The code retains the previous provider/model defaults; model availability was not live-tested. Other providers require their own compatible endpoint, model and key configuration.
+If you pasted a Fish Audio API key into chat or another shared place, revoke it and create a replacement. Store the replacement only in `.env` as `FISH_AUDIO_API_KEY`; do not send it in chat or commit it.
 
-No confirmation setting is needed: delete/purge operations require confirmation; other supported actions run immediately. Discord permission and role-hierarchy checks still apply to both the requester and the bot. The ID allowlist does not turn an ordinary Discord member into a server administrator.
-
-Everyone can use normal chat, including conversational questions and automatic memory of their conversations. Explicit command controls are reserved for your allowlist. COMMAND_USER_IDS does not limit which users appear in normal conversation memory.
-
-Use .env.example for all optional settings. Do not upload your .env or include it when sharing the ZIP.
+Only allow trusted user IDs to issue server actions. `ALLOW_GUILD_ADMINS` and `COMMAND_TRUST_LEVEL` control additional command authorization; they do not grant the bot Discord permissions it does not have. Discord permission and role-hierarchy checks still apply. Supported destructive deletions and purges require the interactive confirmation described in [DISCORD_ACTIONS.md](./DISCORD_ACTIONS.md).

@@ -4,10 +4,8 @@ export async function searchWeb(query, limit = 5) {
   if (!response.ok) {
     throw new Error(`Search failed with status ${response.status}`);
   }
-
   const data = await response.json();
   const results = [];
-
   if (data.AbstractText) {
     results.push({
       title: data.Heading || query,
@@ -15,7 +13,6 @@ export async function searchWeb(query, limit = 5) {
       url: data.AbstractURL || data.AbstractSource || "",
     });
   }
-
   collectRelated(data.RelatedTopics || [], results, limit);
   return results.slice(0, limit);
 }

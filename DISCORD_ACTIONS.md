@@ -1,58 +1,24 @@
-# Discord actions
+# Capri Discord Takeover Actions (Max-Capability Full CRUD Reference)
 
-## Capability and permission map
+Capri understands **natural, casual conversation** — typos, slang, and mid-sentence requests work with zero fixed command syntax (e.g. *"rename this channel to saitama"*, *"cpuld you add role coke to everyone"*, *"nuke the last 20 messages in here"*).
 
-| Area | Supported operations | Requester and bot permissions |
-| --- | --- | --- |
-| Server | Rename, change description | Manage Server |
-| Roles | Create, edit name/color/permissions, delete, assign, remove | Manage Roles; role must be below both parties; no permission escalation |
-| Channels | Create text/voice/category, edit name/topic/slowmode/NSFW, delete | Manage Channels; category checks for parent placement |
-| Members | Ban, unban, kick | Ban Members / Kick Members |
-| Timeouts | Apply, remove with zero minutes | Moderate Members |
-| Nicknames | Set, clear with empty nickname | Manage Nicknames |
-| Voice | Move, disconnect, server mute/unmute, deafen/undeafen | Move / Mute / Deafen Members; Connect for move destination |
-| Messages | Send, edit Capri's own messages | Send Messages; requester also needs Manage Messages to edit Capri's posts |
-| Message management | Delete, purge 1–100 recent messages | Manage Messages + Read Message History |
-| Pins | Pin, unpin by message ID | Pin Messages + Read Message History |
-| Threads | Create public thread in a text channel, archive/unarchive | Create Public Threads / Manage Threads |
-| Invites | Create expiring, limited-use invite | Create Instant Invite |
+## Execution Policy
+- **Create / Read / Update / Bulk Roles / Voice / Stage / Presence / Polls / Moderation / Webhooks / Events / AutoMod**: Executed **immediately** after validation (up to 100 chained steps per plan).
+- **Delete / Purge / Prune Operations**: Always pause and post an interactive Discord prompt with **Confirm deletion** and **Cancel** buttons. Nothing is deleted until the authorized requester clicks **Confirm deletion** within 2 minutes.
 
-View Channel is required for operations targeting an existing channel. Threads additionally require Send Messages in Threads to send there. Discord can reject actions due to server features, permissions or resource limits; failures are reported. Server descriptions can depend on server features.
+## Full Action Matrix (80+ Operations)
 
-## Examples
-
-- `Capri create a role named Crew with color #00CCFF and give it to @Alex`
-- `Capri rename the Crew role to Night Crew`
-- `Capri remove the Night Crew role from @Alex`
-- `Capri unban user 123456789012345678`
-- `Capri remove the timeout from @Alex`
-- `Capri change @Alex's nickname to V`
-- `Capri move @Alex to #Lounge`
-- `Capri unmute @Alex in voice`
-- `Capri set slowmode in #general to 10 seconds`
-- `Capri purge 20 messages in #general`
-- `Capri pin message 123456789012345678 in #general`
-- `Capri create a public thread named Weekend Plans in #general`
-- `Capri create an invite for #general that expires in 24 hours and permits 5 uses`
-
-Replace examples with real mentions and IDs. Enable Discord Developer Mode to copy IDs. For member targets, Capri can resolve a unique exact name from her cached server members; if that name is unavailable or ambiguous, mention the member or provide their ID. Planner-generated member IDs are rejected unless the ID appeared in the original request. She does not guess. For a message operation, supply its ID and channel. Multi-step role creation uses the ID returned by Discord, not a guessed name. Maximum 8 steps per plan.
-
-## Execution design
-
-COMMAND_USER_IDS is the command allowlist: unlisted users may chat, but cannot run natural-language actions, slash commands, prefix commands, or explicit remember/clear commands. Blank means nobody can run commands. Allowed users can address Capri, use the configured prefix, or make a clear direct request such as “create a role named Crew” without a special prefix or bot mention; ordinary conversation and how-to questions still go through chat. Unlisted users' requests are rejected before the action planner is called. ADMIN_USER_IDS defaults to the command allowlist when blank and can further restrict maintenance access, but never widens command access.
-
-The AI receives the current request and a server reference list (roles, channels visible to the requester, explicitly mentioned users). Clear retry follow-ups and contextual commands such as “name it general” can include recent messages from that same user and Capri, and are re-planned against current server state rather than treated as proof of prior success. Explicit names are preserved exactly; ambiguous “default” requests are clarified rather than guessed. Chat history and images cannot directly invoke actions. The model emits structured data validated against src/actions.js; it cannot run JavaScript, arbitrary API endpoints or shell commands.
-
-Only role/channel/message deletion and message purges require approval of the exact frozen plan. The confirmation message has a **Confirm deletion** button and a **Cancel** button; repeat requests link to an existing pending confirmation. Other actions execute immediately for allowed users. Any mixed plan containing deletion waits as a whole; cancellation/expiry causes no changes. Memory deletion commands also require confirmation. Removing a role assignment, banning, kicking and editing do not require confirmation. Requests to “remove the channel name” are clarified rather than treated as channel deletion. If the user delegates a channel name choice, Capri chooses a concise name; empty channel edits are rejected. Channel setting edits are read back from Discord before Capri reports what changed. Current member permissions, role definitions, guild ownership and target-channel permissions are refreshed during execution. Neither administrator permissions nor ADMIN_USER_IDS bypass the target role hierarchy. Roles with permissions beyond the requester or bot are rejected. Audit reasons include requester and request IDs where Discord supports them; the console records outcome summaries.
-
-Completed steps remain applied if a later step fails. Review the result before retrying. Network timeouts can leave an operation's outcome uncertain; inspect the server before repeating it. Only one plan executes per server at a time. Pending deletion confirmations expire after two minutes and are lost on restart. Ordinary chat has no action execution privileges.
-
-Message sends suppress @everyone/user/role notifications. Ban does not delete past messages. Purge skips messages older than 14 days and returns the actual deletion count. Invites expire in 1–168 hours and allow 1–100 uses. Timeouts support 0–40320 minutes. No unattended moderation is added.
-
-Set `DISCORD_ACTIONS_ENABLED=false` in .env to disable the action planner.
-
-## Extending capabilities
-
-Add an explicit typed operation to ACTIONS, implement its permission/target checks and executor branch, and add authorization tests. The planner reads this registry automatically. Do not add unrestricted eval, shell or REST-proxy operations to satisfy “anything”: new capabilities need real integrations and permission rules.
-
-Official API reference: https://discord.js.org/docs/packages/discord.js/14.28.0
+| Area | Read (Immediate) | Create / Update / Bulk (Immediate) | Delete (Confirm Button) |
+| --- | --- | --- | --- |
+| **Server & Bot** | `server_inspect`, `server_backup_snapshot`, `audit_logs_read` | `server_rename`, `server_description`, `server_edit`, `bot_presence_set` (status, activity, nickname) | — |
+| **Members & DMs** | `members_list`, `member_inspect`, `bans_list` | `member_ban`, `member_unban`, `member_kick`, `member_timeout`, `member_nickname`, `members_nickname_all`, `member_dm`, `member_roles_set` | `members_prune` |
+| **Voice & Stage** | `members_list` (`inVoiceOnly`), `server_inspect` | `voice_join`, `voice_leave`, `voice_say` (2-way Gemini Live AI on `discord.py`), `member_move`, `member_disconnect`, `member_mute`, `member_deafen`, `voice_move_all`, `voice_disconnect_all`, `voice_mute_all`, `voice_deafen_all`, `voice_status_set`, `stage_start`, `stage_edit`, `stage_end` | — |
+| **Roles** | `roles_list` | `role_create`, `role_edit` (incl. `@everyone`), `role_add`, `role_remove`, `role_add_all`, `role_remove_all` | `role_delete`, `roles_bulk_delete` |
+| **Channels & Perms** | `channels_list`, `channel_inspect`, `channel_read` | `channel_create` (text/voice/category/announcement/forum/stage), `channel_edit`, `channel_clone`, `channel_permissions_set`, `channel_sync_permissions` | `channel_delete`, `channels_bulk_delete`, `channel_permissions_delete` |
+| **Messages & Polls** | `channel_read` | `message_send` (text + rich embeds), `poll_send`, `message_edit`, `message_react`, `message_pin`, `message_unpin` | `message_delete`, `message_purge` (1–500), `message_reactions_clear` |
+| **Threads & Forums** | `channels_list` | `thread_create` (public/private/forum), `thread_edit`, `thread_member_add`, `thread_member_remove` | `thread_delete` |
+| **Webhooks** | `webhooks_list` | `webhook_create`, `webhook_edit`, `webhook_send` | `webhook_delete` |
+| **Emojis & Stickers** | `emojis_list` | `emoji_create`, `emoji_edit`, `sticker_create` | `emoji_delete`, `sticker_delete` |
+| **Events** | `events_list` | `event_create`, `event_edit` | `event_delete` |
+| **AutoMod** | `automod_list` | `automod_create`, `automod_edit` | `automod_delete` |
+| **Invites** | `invites_list` | `invite_create` | `invite_delete` |

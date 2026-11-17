@@ -2,8 +2,10 @@ node_modules/
 *.zip
 .env
 npm-debug.log*
-data/channel-memory.json
-data/channel-memory.json.tmp
-memory.db
-memory.db-shm
-memory.db-wal
+__pycache__/
+*.py[cod]
+*.db
+*.db-shm
+*.db-wal
+data/
+.DS_Store

@@ -7,7 +7,6 @@ const require = createRequire(import.meta.url);
 const { getLoadablePath } = require("sqlite-vec");
 
 export function createMemoryDb(filePath) {
-  // The DB path may live in a folder that does not exist yet (e.g. /home/container/data).
   mkdirSync(dirname(filePath), { recursive: true });
   const db = new Database(filePath);
   db.pragma("journal_mode = WAL");
@@ -27,7 +26,8 @@ export function createMemoryDb(filePath) {
       importance REAL NOT NULL DEFAULT 0.5,
       summarized INTEGER NOT NULL DEFAULT 0,
       guild_id TEXT NOT NULL DEFAULT '',
-      is_bot INTEGER NOT NULL DEFAULT 0
+      is_bot INTEGER NOT NULL DEFAULT 0,
+      discord_id TEXT NOT NULL DEFAULT ''
     );
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_messages_v USING vec0(
       message_id INTEGER PRIMARY KEY,
@@ -64,16 +64,14 @@ export function createMemoryDb(filePath) {
       user_id TEXT PRIMARY KEY,
       affinity REAL NOT NULL DEFAULT 0,
       notes TEXT NOT NULL DEFAULT '',
-      last_interacted INTEGER NOT NULL DEFAULT 0
+      last_interacted INTEGER NOT NULL DEFAULT 0,
+      romance REAL NOT NULL DEFAULT 0
     );
     CREATE TABLE IF NOT EXISTS journal (
       id INTEGER PRIMARY KEY,
       entry TEXT NOT NULL,
       created_at INTEGER NOT NULL
     );
-  `);
-
-  db.exec(`
     CREATE VIRTUAL TABLE IF NOT EXISTS fts_messages USING fts5(
       content, content='messages', content_rowid='id'
     );
@@ -91,16 +89,14 @@ export function createMemoryDb(filePath) {
 
   if (!db.prepare("SELECT persona FROM self_model WHERE id = 1").get()) {
     db.prepare("INSERT INTO self_model(id, persona, updated_at) VALUES (1, ?, ?)")
-      .run("just joined this server and is getting to know everyone", Date.now());
+      .run("wired into this server and getting a read on everyone here", Date.now());
   }
 
-  // One-time migrations for databases created by older versions.
   if (db.pragma("user_version", { simple: true }) < 2) {
     const columns = db.prepare("PRAGMA table_info(messages)").all();
     if (!columns.some((column) => column.name === "guild_id")) {
       db.exec("ALTER TABLE messages ADD COLUMN guild_id TEXT NOT NULL DEFAULT ''");
     }
-    // Move legacy BLOB embeddings into the real vec0 virtual table, then drop it.
     const legacyVec = db.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'vec_messages'",
     ).get();
@@ -111,7 +107,6 @@ export function createMemoryDb(filePath) {
       `).run();
       db.exec("DROP TABLE vec_messages");
     }
-    // Re-key legacy display-name fact subjects to stable Discord user IDs where possible.
     db.exec(`
       UPDATE facts SET subject = 'user:' || COALESCE(
         (SELECT m.author_id FROM messages m
@@ -123,6 +118,7 @@ export function createMemoryDb(filePath) {
     `);
     db.pragma("user_version = 2");
   }
+
   if (db.pragma("user_version", { simple: true }) < 3) {
     const relColumns = db.prepare("PRAGMA table_info(relationships)").all();
     if (!relColumns.some((column) => column.name === "last_interacted")) {
@@ -130,6 +126,7 @@ export function createMemoryDb(filePath) {
     }
     db.pragma("user_version = 3");
   }
+
   if (db.pragma("user_version", { simple: true }) < 4) {
     const msgColumns = db.prepare("PRAGMA table_info(messages)").all();
     if (!msgColumns.some((column) => column.name === "username")) {
@@ -137,9 +134,7 @@ export function createMemoryDb(filePath) {
     }
     db.pragma("user_version = 4");
   }
-  // v5: mark bot-authored messages so other bots (game bots, helpers) can be
-  // shown in recent conversation and the roster without counting them as
-  // human activity for spontaneous-channel selection.
+
   if (db.pragma("user_version", { simple: true }) < 5) {
     const msgColumns = db.prepare("PRAGMA table_info(messages)").all();
     if (!msgColumns.some((column) => column.name === "is_bot")) {
@@ -147,8 +142,7 @@ export function createMemoryDb(filePath) {
     }
     db.pragma("user_version = 5");
   }
-  // v6: romantic attachment grows separately from friendship affinity. Existing
-  // rows start at 0 (no feelings) — only new intimacy can raise it.
+
   if (db.pragma("user_version", { simple: true }) < 6) {
     const relColumns = db.prepare("PRAGMA table_info(relationships)").all();
     if (!relColumns.some((column) => column.name === "romance")) {
@@ -156,9 +150,7 @@ export function createMemoryDb(filePath) {
     }
     db.pragma("user_version = 6");
   }
-  // v7: store the Discord message id so edits and deletes can be tracked back
-  // to the logged row — she sees the current text and remembers what was
-  // removed. Legacy rows keep '' and simply can't be updated.
+
   if (db.pragma("user_version", { simple: true }) < 7) {
     const msgColumns = db.prepare("PRAGMA table_info(messages)").all();
     if (!msgColumns.some((column) => column.name === "discord_id")) {
@@ -167,13 +159,50 @@ export function createMemoryDb(filePath) {
     db.exec("CREATE INDEX IF NOT EXISTS idx_messages_discord_id ON messages(discord_id)");
     db.pragma("user_version = 7");
   }
-  // v8: game-command vocabulary learned by the AI judgment layer. When she
-  // recognizes a new game bot's trigger word (the way "whl" once had to be
-  // hand-added), it persists here and reloads at boot — the filter grows
-  // without code changes.
+
   if (db.pragma("user_version", { simple: true }) < 8) {
     db.exec("CREATE TABLE IF NOT EXISTS learned_commands(command TEXT PRIMARY KEY, learned_at INTEGER NOT NULL)");
     db.pragma("user_version = 8");
   }
+
+  // v9: Full server takeover directory (every member, roles, voice status, guild topology, autonomous mood).
+  if (db.pragma("user_version", { simple: true }) < 9) {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS guild_members (
+        guild_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        username TEXT NOT NULL DEFAULT '',
+        global_name TEXT NOT NULL DEFAULT '',
+        display_name TEXT NOT NULL DEFAULT '',
+        nickname TEXT NOT NULL DEFAULT '',
+        roles_json TEXT NOT NULL DEFAULT '[]',
+        joined_at INTEGER NOT NULL DEFAULT 0,
+        is_bot INTEGER NOT NULL DEFAULT 0,
+        in_voice_channel_id TEXT NOT NULL DEFAULT '',
+        last_seen_at INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (guild_id, user_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_guild_members_guild ON guild_members(guild_id, is_bot, last_seen_at);
+      CREATE TABLE IF NOT EXISTS guild_state (
+        guild_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL DEFAULT '',
+        owner_id TEXT NOT NULL DEFAULT '',
+        member_count INTEGER NOT NULL DEFAULT 0,
+        snapshot_json TEXT NOT NULL DEFAULT '{}',
+        updated_at INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS autonomy_state (
+        id INTEGER PRIMARY KEY CHECK(id = 1),
+        mood TEXT NOT NULL DEFAULT 'wired and observant',
+        energy REAL NOT NULL DEFAULT 0.85,
+        current_focus TEXT NOT NULL DEFAULT '',
+        last_autonomous_at INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+    db.exec("CREATE INDEX IF NOT EXISTS idx_messages_discord_id ON messages(discord_id)");
+    db.pragma("user_version = 9");
+  }
+
   return db;
 }

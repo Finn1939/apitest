@@ -1,27 +1,26 @@
 {
-  "name": "human-discord-bot",
-  "version": "1.0.0",
+  "name": "capri-discord-bot",
+  "version": "2.0.0",
   "private": true,
-  "description": "A personality-driven Discord chat and research bot",
+  "description": "Capri (Cyberpunk: Edgerunners 2) — autonomous living Discord persona with full server takeover CRUD, confirmation-gated deletes, multimodal context reading, and hybrid persistent memory.",
   "type": "module",
   "scripts": {
-    "start": "node --max-old-space-size=256 src/index.js",
-    "test": "node --test",
-    "smoke": "node src/smoke.js"
+    "start": "node --max-old-space-size=512 src/index.js",
+    "test": "node --test test/*.test.js",
+    "smoke": "node src/smoke.js",
+    "migrate-check": "node migration-check.mjs"
   },
   "engines": {
-    "node": ">=19"
+    "node": ">=20"
   },
   "dependencies": {
-    "@huggingface/transformers": "3.8.1",
-    "better-sqlite3": "11.10.0",
+    "@google/genai": "^3.4.0",
+    "@huggingface/transformers": "^3.8.1",
+    "better-sqlite3": "^11.10.0",
     "discord.js": "^14.25.1",
     "dotenv": "^17.2.3",
-    "openai": "4.104.0",
-    "p-queue": "7.4.1",
+    "openai": "^4.104.0",
+    "p-queue": "^7.4.1",
     "sqlite-vec": "^0.1.9"
-  },
-  "overrides": {
-    "sharp": "0.32.6"
   }
 }
