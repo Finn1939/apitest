@@ -185,6 +185,20 @@ test('allowlisted user commands without an explicit bot address execute immediat
   assert.deepEqual(f.calls, [['rename', 'Night City']]);
   assert.equal(replies.length, 1);
 });
+test('create-and-assign role plans execute immediately without confirmation', async () => {
+  const f = fixture(); const replies = [];
+  f.message.reply = async data => { assert.equal(data.components, undefined); assert.equal(data.files, undefined); replies.push(data); return {}; };
+  const handle = createActionHandler({
+    allowedUserIds: new Set([actorId]),
+    completeAI: async () => JSON.stringify(plan(
+      step('role_create', { name: 'poker' }),
+      step('role_add', { role: '$last_role', user: targetId }),
+    )),
+  });
+  assert.equal(await handle(f.message), true);
+  assert.deepEqual(f.calls.map(call => call[0]), ['create', 'role_add']);
+  assert.equal(replies.length, 1);
+});
 test('unlisted users still get ordinary chat even when a message mentions server or role', async () => {
   const f = fixture();
   f.message.content = 'Hey Capri, should we change the server name? That role is odd.';
