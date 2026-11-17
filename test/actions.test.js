@@ -35,6 +35,10 @@ test('rejects arbitrary endpoints, unknown fields, malformed IDs and unsafe rang
   assert.throws(() => validatePlan({ actions: [] }));
   assert.throws(() => validatePlan({ actions: Array(9).fill(step('server_rename', { name: 'X' })) }));
 });
+test('explains that member actions need a mention or ID instead of a bare name', () => {
+  assert.throws(() => validatePlan(plan(step('role_add', { role: roleId, user: 'karuta' }))), /Mention the member or provide their Discord user ID/);
+  assert.throws(() => validatePlan(plan(step('member_unban', { user: 'karuta' }))), /Provide a Discord user ID to unban/);
+});
 test('requires explicit Capri address, mention, or t do', () => {
   assert.equal(isActionRequest({ content: 'ban this user' }), false);
   assert.equal(isActionRequest({ content: 'hey Capri ban this user' }), true);

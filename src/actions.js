@@ -60,6 +60,12 @@ export function validatePlan(plan) {
       else if (type === 'channelType') valid = ['text', 'voice', 'category'].includes(value);
       else if (type === 'permissions') valid = Array.isArray(value) && value.length <= 50 && value.every(p => typeof p === 'string' && Object.hasOwn(P, p));
       else if (limits[type]) valid = Number.isInteger(value) && value >= limits[type][0] && value <= limits[type][1];
+      if (!valid && type === 'id' && key === 'user') {
+        const guidance = step.action === 'member_unban'
+          ? 'Provide a Discord user ID to unban.'
+          : 'Mention the member or provide their Discord user ID.';
+        throw new Error(guidance);
+      }
       if (!valid) throw new Error(`Invalid ${step.action}.${key}.`);
     }
   }
