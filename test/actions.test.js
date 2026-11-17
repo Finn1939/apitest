@@ -31,12 +31,11 @@ test('validates chained role creation with a reference', () => {
   assert.equal(validatePlan(plan(step('role_create', { name: 'Crew' }), step('role_add', { role: '$last_role', user: targetId }))).actions.length, 2);
 });
 test('rejects arbitrary endpoints, unknown fields, malformed IDs and unsafe ranges', () => {
-  for (const action of [step('eval', { code: 'x' }), step('server_rename', { name: 'X', token: 'x' }), step('member_ban', { user: '@someone' }), step('member_timeout', { user: targetId, minutes: -1 }), step('message_purge', { channel: channelId, count: 101 }), step('role_create', { name: 'X', permissions: ['FakeFlag'] }), step('role_add', { role: '$last_channel', user: targetId })]) assert.throws(() => validatePlan(plan(action)));
+  for (const action of [step('eval', { code: 'x' }), step('server_rename', { name: 'X', token: 'x' }), step('member_unban', { user: '@someone' }), step('member_timeout', { user: targetId, minutes: -1 }), step('message_purge', { channel: channelId, count: 101 }), step('role_create', { name: 'X', permissions: ['FakeFlag'] }), step('role_add', { role: '$last_channel', user: targetId })]) assert.throws(() => validatePlan(plan(action)));
   assert.throws(() => validatePlan({ actions: [] }));
   assert.throws(() => validatePlan({ actions: Array(9).fill(step('server_rename', { name: 'X' })) }));
 });
-test('explains that member actions need a mention or ID instead of a bare name', () => {
-  assert.throws(() => validatePlan(plan(step('role_add', { role: roleId, user: 'karuta' }))), /Mention the member or provide their Discord user ID/);
+test('requires an ID for unbanning a member by name', () => {
   assert.throws(() => validatePlan(plan(step('member_unban', { user: 'karuta' }))), /Provide a Discord user ID to unban/);
 });
 test('requires explicit Capri address, mention, or t do', () => {
@@ -73,6 +72,32 @@ test('role creation and assignment execute in order using returned role ID', asy
   assert.deepEqual(f.calls.map(c => c[0]), ['create', 'role_add']);
   assert.deepEqual(f.calls[0][1].permissions, []);
   assert.equal(f.calls[1][1], roleId);
+});
+test('resolves an exact cached member name, but never guesses when there is no match', async () => {
+  const f = fixture();
+  f.target.displayName = 'Karuta bot';
+  f.target.user = { username: 'Karuta', globalName: 'Karuta bot', bot: true };
+  f.guild.members.cache = new Collection([[targetId, f.target]]);
+  await executeStep(f.message, step('role_add', { role: roleId, user: 'Karuta bot' }));
+  assert.deepEqual(f.calls, [['role_add', roleId]]);
+
+  const missing = fixture();
+  await assert.rejects(
+    executeStep(missing.message, step('role_add', { role: roleId, user: 'Karuta bot' })),
+    /couldn't find a cached member named "Karuta bot"/,
+  );
+
+  const ambiguous = fixture();
+  const duplicate = member('100000000000000007', 1);
+  for (const candidate of [ambiguous.target, duplicate]) {
+    candidate.displayName = 'Karuta bot';
+    candidate.user = { username: 'Karuta', globalName: 'Karuta bot', bot: true };
+  }
+  ambiguous.guild.members.cache = new Collection([[targetId, ambiguous.target], [duplicate.id, duplicate]]);
+  await assert.rejects(
+    executeStep(ambiguous.message, step('role_add', { role: roleId, user: 'Karuta bot' })),
+    /More than one server member matches/,
+  );
 });
 test('cannot create elevated role or assign role beyond requester permissions', async () => {
   const f = fixture(); f.actor.permissions = new PermissionsBitField([P.ManageRoles]);
@@ -210,6 +235,22 @@ test('planner output with trailing chatter still executes its valid JSON plan', 
   const handle = createActionHandler({ allowedUserIds: new Set([actorId]), completeAI: async () => response });
   assert.equal(await handle(f.message), true);
   assert.deepEqual(f.calls, [['rename', 'Night City']]);
+});
+test('records action requests and results so later chat can follow up', async () => {
+  const f = fixture(); const history = [];
+  f.message.reply = async () => ({});
+  const handle = createActionHandler({
+    allowedUserIds: new Set([actorId]),
+    completeAI: async () => JSON.stringify(plan(step('server_rename', { name: 'Night City' }))),
+    onRequest: message => history.push(['user', message.content]),
+    onReply: (message, content) => history.push(['assistant', content]),
+  });
+  await handle(f.message);
+  assert.equal(history.length, 2);
+  assert.equal(history[0][0], 'user');
+  assert.equal(history[0][1], f.message.content);
+  assert.equal(history[1][0], 'assistant');
+  assert.match(history[1][1], /Night City/);
 });
 test('unlisted users still get ordinary chat even when a message mentions server or role', async () => {
   const f = fixture();

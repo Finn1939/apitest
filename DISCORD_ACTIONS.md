@@ -35,7 +35,7 @@ View Channel is required for operations targeting an existing channel. Threads a
 - `Capri create a public thread named Weekend Plans in #general`
 - `Capri create an invite for #general that expires in 24 hours and permits 5 uses`
 
-Replace examples with real mentions and IDs. Enable Discord Developer Mode to copy IDs. Member targets require mentions or IDs, not fuzzy username guesses. For a message operation, supply its ID and channel. Multi-step role creation uses the ID returned by Discord, not a guessed name. Maximum 8 steps per plan.
+Replace examples with real mentions and IDs. Enable Discord Developer Mode to copy IDs. For member targets, Capri can resolve a unique exact name from her cached server members; if that name is unavailable or ambiguous, mention the member or provide their ID. She does not guess. For a message operation, supply its ID and channel. Multi-step role creation uses the ID returned by Discord, not a guessed name. Maximum 8 steps per plan.
 
 ## Execution design
 

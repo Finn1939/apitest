@@ -508,6 +508,32 @@ function rememberUserMessage(channelId, displayName, content) {
   persistMemory();
 }
 
+function rememberActionRequest(message) {
+  const content = renderDiscordMentions(message.content, {
+    users: message.mentions.users,
+    roles: message.mentions.roles,
+    channels: message.mentions.channels,
+  });
+  const displayName = message.member?.displayName || message.author.username;
+  const loggedId = logMessage(memoryDb, {
+    channelId: message.channel.id,
+    authorId: message.author.id,
+    authorName: displayName,
+    username: message.author.username,
+    content,
+    createdAt: message.createdTimestamp,
+    guildId: message.guild?.id || "",
+    discordId: message.id,
+  });
+  jobs.enqueueEmbedding(loggedId, content);
+  rememberUserMessage(message.channel.id, displayName, content);
+}
+
+function rememberActionReply(message, content) {
+  rememberBotMessage(message.channel.id, content);
+  rememberOwnMessage(message, content);
+}
+
 function factsContext(channelId) {
   const facts = channelFacts.get(channelId) || [];
   return facts.length ? `Things explicitly remembered in this channel:\n${facts.map((fact) => `- ${fact}`).join("\n")}` : "";
@@ -1120,7 +1146,14 @@ async function fetchGameChannelSnapshot(channel, referenceId) {
     : "";
 }
 
-const handleActions = createActionHandler({ completeAI, enabled: process.env.DISCORD_ACTIONS_ENABLED !== "false", prefix: config.prefix, allowedUserIds: config.commandUserIds });
+const handleActions = createActionHandler({
+  completeAI,
+  enabled: process.env.DISCORD_ACTIONS_ENABLED !== "false",
+  prefix: config.prefix,
+  allowedUserIds: config.commandUserIds,
+  onRequest: rememberActionRequest,
+  onReply: rememberActionReply,
+});
 
 client.on(Events.MessageCreate, async (message) => {
   if (message.author.bot) {
