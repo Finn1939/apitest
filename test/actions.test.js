@@ -41,6 +41,14 @@ test('requires explicit Capri address, mention, or t do', () => {
   assert.equal(isActionRequest({ content: 't do make a role' }), true);
   assert.equal(isActionRequest({ content: 'hi Capri' }), false);
 });
+test('allowlisted users can phrase clear action requests casually without addressing Capri', () => {
+  assert.equal(isActionRequest({ content: 'Create a role named Crew' }, 't', true), true);
+  assert.equal(isActionRequest({ content: 'Could you rename the server to Night City?' }, 't', true), true);
+  assert.equal(isActionRequest({ content: 'How do I create a role?' }, 't', true), false);
+  assert.equal(isActionRequest({ content: 'Please do not delete that channel' }, 't', true), false);
+  assert.equal(isActionRequest({ content: 'I think their role is funny' }, 't', true), false);
+  assert.equal(isActionRequest({ content: 'Hey Capri, should we rename the server?' }), false);
+});
 test('permission check rejects missing permission even when bot has it', async () => {
   const f = fixture(); f.actor.permissions = new PermissionsBitField();
   await assert.rejects(executeStep(f.message, step('server_rename', { name: 'X' })), /Missing ManageGuild/);
@@ -160,16 +168,26 @@ for (const operation of [step('server_rename', { name: 'Night City' }), step('ro
   assert.equal(f.calls.length, 1);
   assert.equal(replies.length, 1);
 });
-for (const ids of [new Set(), new Set([targetId])]) test('unlisted users cannot execute actions or open deletion confirmation', async () => {
+for (const ids of [new Set(), new Set([targetId])]) test('unlisted users are denied before action planning', async () => {
   const f = fixture(); const replies = [];
   f.message.reply = async data => { assert.equal(data.components, undefined); replies.push(data); return {}; };
-  const handle = createActionHandler({ allowedUserIds: ids, completeAI: async () => JSON.stringify(plan(step('member_ban', { user: targetId }))) });
+  const handle = createActionHandler({ allowedUserIds: ids, completeAI: async () => { throw new Error('planner must not run'); } });
   await handle(f.message);
   assert.equal(f.calls.length, 0);
   assert.match(replies[0].content, /COMMAND_USER_IDS/);
 });
+test('allowlisted user commands without an explicit bot address execute immediately', async () => {
+  const f = fixture(); const replies = [];
+  f.message.content = 'Could you rename the server to Night City?';
+  f.message.reply = async data => { replies.push(data); return {}; };
+  const handle = createActionHandler({ allowedUserIds: new Set([actorId]), completeAI: async () => JSON.stringify(plan(step('server_rename', { name: 'Night City' }))) });
+  assert.equal(await handle(f.message), true);
+  assert.deepEqual(f.calls, [['rename', 'Night City']]);
+  assert.equal(replies.length, 1);
+});
 test('unlisted users still get ordinary chat even when a message mentions server or role', async () => {
   const f = fixture();
+  f.message.content = 'Hey Capri, should we change the server name? That role is odd.';
   const handle = createActionHandler({ allowedUserIds: new Set(), completeAI: async () => '{"actions":[],"chat":true}' });
   assert.equal(await handle(f.message), false);
 });

@@ -234,11 +234,21 @@ export async function executePlan(message, plan, run = executeStep) {
   return results;
 }
 
-export function isActionRequest(message, prefix = 't') {
+export function isActionRequest(message, prefix = 't', allowUnaddressed = false) {
   const text = message.content || '';
   const named = /\bcapri\b/i.test(text) || Boolean(message.client?.user && message.mentions?.users?.has(message.client.user.id));
   const command = text.toLowerCase().startsWith(`${prefix.toLowerCase()} do `);
-  return (named || command) && /\b(create|make|add|assign|remove|rename|change|edit|delete|ban|unban|kick|timeout|time out|mute|unmute|deafen|move|disconnect|send|post|pin|unpin|purge|clear|archive|unarchive|invite|role|channel|server|nickname)\b/i.test(text);
+  const action = /\b(create|make|add|assign|remove|rename|change|edit|delete|ban|unban|kick|timeout|time out|mute|unmute|deafen|move|disconnect|send|post|pin|unpin|purge|clear|archive|unarchive|invite|role|channel|server|nickname)\b/i.test(text);
+  if (!action) return false;
+  if (command) return true;
+  if (!named && !allowUnaddressed) return false;
+  const request = named
+    ? text.replace(/^\s*(?:(?:hey|hi|yo|okay|ok)[,! ]+)?(?:(?:<@!?\d+>)|(?:capri\b))[\s,:!-]*/i, '')
+    : text;
+  if (/^\s*(?:please\s+)?(?:don't|do not|never|should not|shouldn't|how do i|how can i|what if|imagine|hypothetically|should we|could we|can we)\b/i.test(request)) return false;
+  return /^\s*(?:(?:hey|yo|okay|ok)[,! ]+)?(?:please\s+)?(?:create|make|add|assign|remove|rename|change|edit|delete|ban|unban|kick|timeout|time out|mute|unmute|deafen|move|disconnect|send|post|pin|unpin|purge|clear|archive|unarchive|invite)\b/i.test(request)
+    || /^\s*(?:(?:hey|yo|okay|ok)[,! ]+)?(?:can|could|would)\s+you\b/i.test(request)
+    || /^\s*(?:please|i need you to|i want you to|help me)\b/i.test(request);
 }
 
 export const DELETE_ACTIONS = new Set(['role_delete', 'channel_delete', 'message_delete', 'message_purge']);
@@ -267,8 +277,15 @@ const busy = new Set();
 export function createActionHandler({ completeAI, enabled = true, prefix = 't', allowedUserIds = parseCommandUserIds(process.env.COMMAND_USER_IDS) }) {
   const planning = new Set();
   return async function handleActions(message) {
-    if (!enabled || !isActionRequest(message, prefix)) return false;
+    if (!enabled) return false;
     const reply = content => message.reply({ content, allowedMentions: { parse: [] } });
+    const explicitlyAddressed = isActionRequest(message, prefix);
+    if (!canRunCommands(message.author.id, allowedUserIds)) {
+      if (!explicitlyAddressed) return false;
+      await reply(COMMAND_DENIED);
+      return true;
+    }
+    if (!isActionRequest(message, prefix, true)) return false;
     if (!message.guild) { await reply('Server actions need to be requested in the server where you want them done.'); return true; }
     const key = `${message.guild.id}:${message.author.id}`;
     if (planning.has(key)) {
@@ -283,7 +300,7 @@ export function createActionHandler({ completeAI, enabled = true, prefix = 't', 
         currentChannel: message.channel.id,
         requester: message.author.id,
         roles: [...roles.values()].map(r => ({ id: r.id, name: r.name })),
-        channels: [...channels.values()].filter(c => c && c.permissionsFor(actor)?.has(P.ViewChannel)).map(c => ({ id: c.id, name: c.name })),
+        channels: [...channels.values()].filter(c => typeof c?.permissionsFor === 'function' && c.permissionsFor(actor)?.has(P.ViewChannel)).map(c => ({ id: c.id, name: c.name })),
         mentionedUsers: [...message.mentions.users.values()].map(u => ({ id: u.id, name: u.username })),
       };
       const raw = await completeAI({ messages: [
@@ -293,10 +310,8 @@ export function createActionHandler({ completeAI, enabled = true, prefix = 't', 
       const parsed = JSON.parse(raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''));
       if (Array.isArray(parsed.actions) && !parsed.actions.length) {
         if (parsed.chat === true) return false;
-        if (!canRunCommands(message.author.id, allowedUserIds)) { await reply(COMMAND_DENIED); return true; }
         await reply(String(parsed.clarification || 'Please specify the action and exact targets.').slice(0, 1800)); return true;
       }
-      if (!canRunCommands(message.author.id, allowedUserIds)) { await reply(COMMAND_DENIED); return true; }
       const plan = validatePlan(parsed);
       if (!requiresDeleteConfirmation(plan)) {
         if (busy.has(message.guild.id)) { await reply('Another command is running. Try again in a moment.'); return true; }

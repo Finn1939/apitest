@@ -39,7 +39,7 @@ Replace examples with real mentions and IDs. Enable Discord Developer Mode to co
 
 ## Execution design
 
-COMMAND_USER_IDS is the command allowlist: unlisted users may chat, but cannot run natural-language actions, slash commands, prefix commands, or explicit remember/clear commands. Blank means nobody can run commands. ADMIN_USER_IDS defaults to the command allowlist when blank and can further restrict maintenance access, but never widens command access.
+COMMAND_USER_IDS is the command allowlist: unlisted users may chat, but cannot run natural-language actions, slash commands, prefix commands, or explicit remember/clear commands. Blank means nobody can run commands. Allowed users can address Capri, use the configured prefix, or make a clear direct request such as “create a role named Crew” without a special prefix or bot mention; ordinary conversation and how-to questions still go through chat. Unlisted users' requests are rejected before the action planner is called. ADMIN_USER_IDS defaults to the command allowlist when blank and can further restrict maintenance access, but never widens command access.
 
 The AI receives only the current request and a server reference list (roles, channels visible to the requester, explicitly mentioned users). Chat history and images cannot directly invoke actions. The model emits structured data validated against src/actions.js; it cannot run JavaScript, arbitrary API endpoints or shell commands.
 
