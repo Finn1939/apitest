@@ -268,17 +268,32 @@ export async function executePlan(message, plan, run = executeStep) {
   return results;
 }
 
-export function isActionRequest(message, prefix = 't', allowUnaddressed = false) {
+const ACTION_VERBS = '(?:create|make|add|assign|remove|rename|change|edit|delete|ban|unban|kick|timeout|time out|mute|unmute|deafen|move|disconnect|send|post|pin|unpin|purge|clear|archive|unarchive|invite)';
+function actionRequestText(message, prefix) {
   const text = message.content || '';
+  const commandPrefix = `${prefix.toLowerCase()} do `;
+  const command = text.toLowerCase().startsWith(commandPrefix);
   const named = /\bcapri\b/i.test(text) || Boolean(message.client?.user && message.mentions?.users?.has(message.client.user.id));
-  const command = text.toLowerCase().startsWith(`${prefix.toLowerCase()} do `);
+  let request = named
+    ? text.replace(/^\s*(?:(?:hey|hi|yo|okay|ok)[,! ]+)?(?:(?:<@!?\d+>)|(?:capri\b))[\s,:!-]*/i, '')
+    : command ? text.slice(commandPrefix.length) : text;
+  request = request
+    .replace(/^\s*(?:bet|yeah|yep|sure|alright|okay|ok)[,! ]+/i, '')
+    .replace(/^\s*running it again\s*[,!:—-]\s*/i, '');
+  return { text, command, named, request };
+}
+
+function isDirectActionRequest(request) {
+  const verb = ACTION_VERBS;
+  return new RegExp(`^(?:please\\s+)?${verb}\\b|^(?:(?:can|could|would)\\s+you|i need you to|i want you to|help me)\\s+(?:please\\s+)?${verb}\\b`, 'i').test(request);
+}
+
+export function isActionRequest(message, prefix = 't', allowUnaddressed = false) {
+  const { text, command, named, request } = actionRequestText(message, prefix);
   const action = /\b(create|make|add|assign|remove|rename|change|edit|delete|ban|unban|kick|timeout|time out|mute|unmute|deafen|move|disconnect|send|post|pin|unpin|purge|clear|archive|unarchive|invite|role|channel|server|nickname)\b/i.test(text);
   if (!action) return false;
   if (command) return true;
   if (!named && !allowUnaddressed) return false;
-  const request = named
-    ? text.replace(/^\s*(?:(?:hey|hi|yo|okay|ok)[,! ]+)?(?:(?:<@!?\d+>)|(?:capri\b))[\s,:!-]*/i, '')
-    : text;
   if (/^\s*(?:please\s+)?(?:don't|do not|never|should not|shouldn't|how do i|how can i|what if|imagine|hypothetically|should we|could we|can we)\b/i.test(request)) return false;
   return /^\s*(?:(?:hey|yo|okay|ok)[,! ]+)?(?:please\s+)?(?:create|make|add|assign|remove|rename|change|edit|delete|ban|unban|kick|timeout|time out|mute|unmute|deafen|move|disconnect|send|post|pin|unpin|purge|clear|archive|unarchive|invite)\b/i.test(request)
     || /^\s*(?:(?:hey|yo|okay|ok)[,! ]+)?(?:can|could|would)\s+you\b/i.test(request)
@@ -368,7 +383,12 @@ export function createActionHandler({
       const parsed = extractJson(raw);
       if (!parsed) throw new Error('Action planner returned invalid JSON.');
       if (Array.isArray(parsed.actions) && !parsed.actions.length) {
-        if (parsed.chat === true) return false;
+        if (parsed.chat === true) {
+          if (!isDirectActionRequest(actionRequestText(message, prefix).request)) return false;
+          recordRequest();
+          await reply('I couldn’t translate that direct request into a supported action. Please restate the exact change and target.');
+          return true;
+        }
         recordRequest();
         await reply(String(parsed.clarification || 'Please specify the action and exact targets.').slice(0, 1800)); return true;
       }

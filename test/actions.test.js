@@ -47,6 +47,7 @@ test('requires explicit Capri address, mention, or t do', () => {
 test('allowlisted users can phrase clear action requests casually without addressing Capri', () => {
   assert.equal(isActionRequest({ content: 'Create a role named Crew' }, 't', true), true);
   assert.equal(isActionRequest({ content: 'Could you rename the server to Night City?' }, 't', true), true);
+  assert.equal(isActionRequest({ content: 'Bet, running it again—add sprite to brochacho.' }, 't', true), true);
   assert.equal(isActionRequest({ content: 'How do I create a role?' }, 't', true), false);
   assert.equal(isActionRequest({ content: 'Please do not delete that channel' }, 't', true), false);
   assert.equal(isActionRequest({ content: 'I think their role is funny' }, 't', true), false);
@@ -161,6 +162,7 @@ for (const mode of ['cancel', 'timeout', 'revoke']) test(`${mode} prevents execu
 });
 test('ordinary discussion can fall through to chat without performing actions', async () => {
   const f = fixture();
+  f.message.content = 'Could you explain how to add a role?';
   const handler = createActionHandler({ allowedUserIds: new Set([actorId]), completeAI: async () => '{"actions":[],"chat":true}' });
   assert.equal(await handler(f.message), false);
 });
@@ -227,6 +229,31 @@ test('create-and-assign role plans execute immediately without confirmation', as
   assert.equal(await handle(f.message), true);
   assert.deepEqual(f.calls.map(call => call[0]), ['create', 'role_add']);
   assert.equal(replies.length, 1);
+});
+test('casually prefaced role assignments still execute immediately', async () => {
+  const f = fixture(); const replies = [];
+  f.message.content = 'Bet, running it again—add sprite to brochacho.';
+  f.message.reply = async data => { assert.equal(data.components, undefined); assert.equal(data.files, undefined); replies.push(data); return {}; };
+  const handle = createActionHandler({
+    allowedUserIds: new Set([actorId]),
+    completeAI: async () => JSON.stringify(plan(step('role_add', { role: roleId, user: targetId }))),
+  });
+  assert.equal(await handle(f.message), true);
+  assert.deepEqual(f.calls.map(call => call[0]), ['role_add']);
+  assert.equal(replies.length, 1);
+});
+test('a planner chat fallback cannot claim a direct action is waiting for confirmation', async () => {
+  const f = fixture(); const replies = [];
+  f.message.content = 'Bet, running it again—add sprite to brochacho.';
+  f.message.reply = async data => { assert.equal(data.components, undefined); assert.equal(data.files, undefined); replies.push(data); return {}; };
+  const handle = createActionHandler({
+    allowedUserIds: new Set([actorId]),
+    completeAI: async () => '{"actions":[],"chat":true}',
+  });
+  assert.equal(await handle(f.message), true);
+  assert.match(replies[0].content, /couldn’t translate that direct request/);
+  assert.doesNotMatch(replies[0].content, /Run these actions/);
+  assert.equal(f.calls.length, 0);
 });
 test('planner output with trailing chatter still executes its valid JSON plan', async () => {
   const f = fixture();

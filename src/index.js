@@ -1541,6 +1541,7 @@ client.on(Events.MessageCreate, async (message) => {
             `Your personality: ${config.personality}`,
             "Reply conversationally and naturally, like chatting with a friend on Discord.",
             "Use Discord-friendly formatting and keep replies concise.",
+            "Never invent Discord action plans or confirmation buttons, or claim a server change is pending or complete. Only report an action when the action handler's actual result is present in the conversation.",
             renderAliveness(new Date(), lastSpokeAtRef.value),
             factsContextText,
             persistentContext.memoryBlock,
