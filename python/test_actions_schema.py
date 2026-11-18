@@ -88,6 +88,8 @@ class TestPythonActionsSchema(unittest.TestCase):
         self.assertTrue(is_action_request("read 1567358193334493247", allow_unaddressed=True))
         self.assertTrue(should_check_authorized_action("cpuld you add role coke to everyone"))
         self.assertFalse(should_check_authorized_action("lol"))
+        self.assertFalse(is_action_request("Capri, make me laugh", is_named=True))
+        self.assertTrue(is_action_request("Capri, give <@123> the green role", is_named=True))
         self.assertTrue(requires_delete_confirmation({"actions": [{"action": next(iter(DELETE_ACTIONS)), "args": {}}]}))
 
 

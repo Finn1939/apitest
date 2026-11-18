@@ -119,6 +119,39 @@ class TestVoiceAudio(unittest.TestCase):
 
 
 class TestGeminiVoiceConnection(unittest.IsolatedAsyncioTestCase):
+    async def test_send_audio_loop_keeps_continuous_pcm_stream(self):
+        class FakeLiveSession:
+            def __init__(self):
+                self.inputs = []
+                self.sent = asyncio.Event()
+
+            async def send_realtime_input(self, **kwargs):
+                self.inputs.append(kwargs)
+                self.sent.set()
+
+        session = CapriVoiceSession(
+            guild=SimpleNamespace(id=1),
+            voice_channel=SimpleNamespace(),
+            fish_api_key="test-key",
+            reference_id="test-voice",
+        )
+        live = FakeLiveSession()
+        frame = b"\x01\x00" * 320
+        for _ in range(5):
+            session._audio_queue.put_nowait((42, "speaker", frame))
+
+        task = asyncio.create_task(session._send_audio_loop(live))
+        try:
+            await asyncio.wait_for(live.sent.wait(), timeout=1)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        self.assertEqual(len(live.inputs), 1)
+        self.assertEqual(live.inputs[0]["audio"].data, frame * 5)
+        self.assertEqual(live.inputs[0]["audio"].mime_type, "audio/pcm;rate=16000")
+        self.assertNotIn("audio_stream_end", live.inputs[0])
+
     async def test_dave_state_blocks_audio_until_encryption_is_available(self):
         session = CapriVoiceSession(
             guild=SimpleNamespace(id=1),
@@ -418,6 +451,9 @@ class TestGeminiVoiceConnection(unittest.IsolatedAsyncioTestCase):
             async def __aexit__(self, *_args):
                 return False
 
+            async def close(self):
+                pass
+
             def post(self, url, *, headers, json):
                 self.request = (url, headers, json)
                 requests.append(self.request)
@@ -438,70 +474,7 @@ class TestGeminiVoiceConnection(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(requests[0][2]["format"], "pcm")
         self.assertEqual(requests[0][2]["sample_rate"], 24000)
         self.assertEqual(session.audio_source.buffered_bytes(), 16)
-
-    async def test_asr_sender_sends_captured_audio_without_padding_idle_silence(self):
-        session = CapriVoiceSession(
-            guild=SimpleNamespace(id=1),
-            voice_channel=SimpleNamespace(),
-            fish_api_key="test-key",
-            reference_id="test-voice",
-        )
-        pcm_frame = b"\x01\x00" * 320
-        session._audio_queue.put_nowait((22, "Sam", pcm_frame))
-
-        class FakeLiveSession:
-            audio = None
-
-            async def send_realtime_input(self, *, audio):
-                self.audio = audio
-                session._stop_event.set()
-
-        live_session = FakeLiveSession()
-        await session._send_audio_loop(live_session)
-        self.assertEqual(live_session.audio.mime_type, "audio/pcm;rate=16000")
-        self.assertEqual(live_session.audio.data, pcm_frame)
-        self.assertEqual((session._last_speaker_id, session._last_speaker_name), (22, "Sam"))
-
-    async def test_asr_sender_does_not_stream_silence_while_idle(self):
-        session = CapriVoiceSession(
-            guild=SimpleNamespace(id=1),
-            voice_channel=SimpleNamespace(),
-            fish_api_key="test-key",
-            reference_id="test-voice",
-        )
-
-        class FakeLiveSession:
-            sent_audio = False
-
-            async def send_realtime_input(self, *, audio):
-                self.sent_audio = True
-
-        live_session = FakeLiveSession()
-        sender = asyncio.create_task(session._send_audio_loop(live_session))
-        await asyncio.sleep(0.02)
-        self.assertFalse(live_session.sent_audio)
-        sender.cancel()
-        await asyncio.gather(sender, return_exceptions=True)
-
-    async def test_receiver_queues_final_transcript_with_latest_speaker(self):
-        session = CapriVoiceSession(
-            guild=SimpleNamespace(id=1),
-            voice_channel=SimpleNamespace(),
-            fish_api_key="test-key",
-            reference_id="test-voice",
-        )
-        session._last_speaker_id = 22
-        session._last_speaker_name = "Sam"
-
-        class FakeLiveSession:
-            async def receive(self):
-                yield SimpleNamespace(server_content=SimpleNamespace(
-                    input_transcription=SimpleNamespace(text="  Hello there.  ")
-                ))
-                session._stop_event.set()
-
-        await session._receive_asr_loop(FakeLiveSession())
-        self.assertEqual(await session._turn_queue.get(), (22, "Sam", "Hello there."))
+        await session.stop()
 
     async def test_no_voice_input_prompts_text_chat_fallback(self):
         class FakeTextChannel:
@@ -520,7 +493,7 @@ class TestGeminiVoiceConnection(unittest.IsolatedAsyncioTestCase):
         )
         with patch("voice_live.VOICE_INPUT_TIMEOUT_SECONDS", 0):
             await session._watch_initial_voice_input()
-        self.assertIn("mention Capri here", channel.messages[0])
+        self.assertIn("ping me here", channel.messages[0])
 
     async def test_missing_voice_receiver_keeps_text_and_speech_workers_available(self):
         class FakeTextChannel:
@@ -547,7 +520,7 @@ class TestGeminiVoiceConnection(unittest.IsolatedAsyncioTestCase):
         )
         runner = asyncio.create_task(session._run_session_loop())
         await asyncio.wait_for(channel.notified.wait(), timeout=1)
-        self.assertIn("Voice listening isn't available", channel.messages[0])
+        self.assertIn("My mic feed’s quiet", channel.messages[0])
         await session.stop()
         await runner
 

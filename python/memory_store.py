@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sqlite3
 import time
@@ -25,6 +26,7 @@ def open_memory_db(db_path: str) -> sqlite3.Connection:
             is_bot INTEGER NOT NULL DEFAULT 0,
             discord_id TEXT NOT NULL DEFAULT ''
         );
+        CREATE INDEX IF NOT EXISTS idx_messages_channel_recent ON messages(channel_id, id);
         CREATE TABLE IF NOT EXISTS facts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             subject TEXT NOT NULL,
@@ -111,7 +113,7 @@ def log_message(
     db.commit()
 
 
-def upsert_guild_member(db: sqlite3.Connection, guild_id: int | str, member: discord.Member) -> None:
+def upsert_guild_member(db: sqlite3.Connection, guild_id: int | str, member: discord.Member, *, commit=True) -> None:
     roles = [r.name for r in member.roles if r.id != member.guild.id]
     joined_ts = int(member.joined_at.timestamp() * 1000) if member.joined_at else 0
     voice_id = str(member.voice.channel.id) if member.voice and member.voice.channel else ""
@@ -147,7 +149,8 @@ def upsert_guild_member(db: sqlite3.Connection, guild_id: int | str, member: dis
             now_ms,
         ),
     )
-    db.commit()
+    if commit:
+        db.commit()
 
 
 async def fetch_guild_channels(guild: discord.Guild) -> list[Any]:
@@ -164,7 +167,7 @@ async def fetch_guild_channels(guild: discord.Guild) -> list[Any]:
         return list(guild.channels)
 
 
-async def sync_guild_directory(db: sqlite3.Connection, guild: discord.Guild) -> dict[str, int]:
+async def sync_guild_directory(db: sqlite3.Connection, guild: discord.Guild, *, worker=None) -> dict[str, int]:
     members = list(guild.members)
     if not members:
         try:
@@ -179,8 +182,13 @@ async def sync_guild_directory(db: sqlite3.Connection, guild: discord.Guild) -> 
     except discord.HTTPException:
         roles = [r for r in guild.roles if r.id != guild.id]
 
-    for m in members:
-        upsert_guild_member(db, guild.id, m)
+    return await asyncio.get_running_loop().run_in_executor(worker, _save_directory, db, guild, members, channels, roles)
+
+
+def _save_directory(db, guild, members, channels, roles):
+    with db:
+        for member in members:
+            upsert_guild_member(db, guild.id, member, commit=False)
 
     snapshot = {
         "channels": [
@@ -247,7 +255,7 @@ def build_server_knowledge(db: sqlite3.Connection, guild: discord.Guild | None, 
 
     in_voice = [m for m in guild.members if m.voice and m.voice.channel]
     if in_voice:
-        lines.append("In Voice Now: " + ", ".join(f"{m.display_name} (<#{m.voice.channel.id}>)" for m in in_voice))
+        lines.append("In Voice Now: " + ", ".join(f"{m.display_name} (<#{m.voice.channel.id}>)" for m in in_voice[:25]))
 
     rows = db.execute(
         "SELECT user_id, username, display_name, roles_json, is_bot FROM guild_members WHERE guild_id = ? ORDER BY is_bot ASC, last_seen_at DESC LIMIT 35",
@@ -275,13 +283,13 @@ def build_prompt_context(
 ) -> str:
     server_knowledge = build_server_knowledge(db, message.guild, message.channel)
     facts_rows = db.execute(
-        "SELECT fact FROM facts WHERE subject = ? ORDER BY hits DESC, last_seen DESC LIMIT 20",
+        "SELECT fact FROM facts WHERE subject = ? ORDER BY hits DESC, last_seen DESC LIMIT 8",
         (f"user:{message.author.id}",),
     ).fetchall()
     facts_text = "\n".join(f"- {r['fact']}" for r in facts_rows) or "No stored personal facts yet."
 
     recent_rows = db.execute(
-        "SELECT author_id, author_name, content, is_bot FROM messages WHERE channel_id = ? ORDER BY id DESC LIMIT 25",
+        "SELECT author_id, author_name, content, is_bot FROM messages WHERE channel_id = ? ORDER BY id DESC LIMIT 12",
         (str(message.channel.id),),
     ).fetchall()
     recent_lines = []
@@ -289,9 +297,9 @@ def build_prompt_context(
         if "/run these actions/i" in (row["content"] or "").lower() or "run these actions" in (row["content"] or "").lower():
             continue
         if int(row["author_id"]) == bot_user_id:
-            recent_lines.append(f"You: {row['content']}")
+            recent_lines.append(f"You: {row['content'][:450]}")
         else:
-            recent_lines.append(f"{row['author_name']}: {row['content']}")
+            recent_lines.append(f"{row['author_name']}: {row['content'][:450]}")
 
     return "\n\n".join(
         [

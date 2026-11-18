@@ -1,8 +1,9 @@
 discord.py[voice]>=2.7.1
-discord-ext-voice-recv>=0.5.0
-davey>=0.2.0
+discord-ext-voice-recv @ git+https://github.com/rdphillips7/discord-ext-voice-recv@e0cc062ee2fe10311ffacdd4a4d00de707d6b1a7
+davey==0.1.6
 PyNaCl>=1.5.0
 google-genai>=1.0.0
 openai>=1.50.0
 python-dotenv>=1.0.1
 aiohttp>=3.9.0
+pypdf>=5.0

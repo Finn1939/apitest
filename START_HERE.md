@@ -1,6 +1,19 @@
 # Capri Discord Bot
 
-## Setup
+## Python upgrade
+
+Use the Python launcher for persona-aware replies and downloadable study guides. Install with
+`python -m pip install -r python/requirements.txt`, then run `python python/bot.py`.
+In your existing `.env`, set `USERID` to your numeric Discord ID for single-controller mode.
+The Python launcher keeps the existing `COMMAND_USER_IDS` and `ALLOW_GUILD_ADMINS` rules when
+`USERID` is empty. Anyone can chat. Only controllers can request file generation.
+Give Capri Send Messages, Read Message History, and Attach Files in the destination channel.
+Run only one launcher with the token.
+
+Try **Capri, make me a reviewer on SQL stored procedures** or attach a lecture PDF with
+selectable text and say **Turn this into study notes**. See [the Python change summary](PYTHON_UPGRADE.md).
+
+## Node.js setup
 1. Install Node.js 20 or newer.
 2. Install dependencies with `npm install`.
 3. Copy `.env.minimal.example` to `.env` and configure the Discord token, AI provider key, and authorized Discord user IDs. See [ENV_SETUP.md](./ENV_SETUP.md).

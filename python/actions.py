@@ -1,5 +1,7 @@
 import asyncio
 import datetime
+import logging
+from capri_replies import CONFIRM, CANCEL, SourceProblem, failure
 import json
 import re
 from typing import Any
@@ -131,28 +133,28 @@ def check_permission(member: discord.Member, permission_flag: str, channel: Any 
 
 def check_hierarchy(guild: discord.Guild, actor: discord.Member, bot_member: discord.Member, target: discord.Member, *, allow_self: bool = False, check_actor: bool = False) -> None:
     if target.id == guild.owner_id:
-        raise ValueError("Target is the server owner — Discord blocks modifications above owner.")
+        raise SourceProblem("That’s the server owner. Their seat is out of reach.")
     if target.id == bot_member.id:
-        raise ValueError("Capri cannot moderate herself.")
+        raise SourceProblem("That’s me you’re pointing at. Pick someone else.")
     if target.id == actor.id and not allow_self:
         raise ValueError("That action cannot target yourself.")
     if check_actor and actor.id != guild.owner_id and target.id != actor.id and actor.top_role <= target.top_role:
-        raise ValueError("Target is at or above your highest role.")
+        raise SourceProblem("Their role sits level with yours or higher. That move’s locked.")
     if bot_member.top_role <= target.top_role:
-        raise ValueError("Target is at or above Capri's highest role.")
+        raise SourceProblem("Their role sits level with mine or higher. I can’t move them.")
 
 
 def check_role(guild: discord.Guild, actor: discord.Member, bot_member: discord.Member, role: discord.Role, *, check_actor: bool = False, allow_everyone: bool = False) -> None:
     if role.id == guild.id:
         if not allow_everyone:
-            raise ValueError("Cannot assign or delete @everyone.")
+            raise SourceProblem("Everyone already has @everyone. That one stays put.")
         return
     if role.managed or not role.is_assignable():
-        raise ValueError("That role cannot be managed by Capri.")
+        raise SourceProblem("That role’s managed elsewhere. I can’t change it here.")
     if check_actor and actor.id != guild.owner_id and actor.top_role <= role:
-        raise ValueError("Role is at or above your highest role.")
+        raise SourceProblem("That role sits level with yours or higher. That move’s locked.")
     if bot_member.top_role <= role:
-        raise ValueError("Role is at or above Capri's highest role.")
+        raise SourceProblem("That role sits level with mine or higher. I can’t touch it.")
 
 
 def resolve_member_id(guild: discord.Guild, value: str, db_members: list[dict[str, Any]] | None = None) -> int:
@@ -571,16 +573,7 @@ async def execute_step(
         if len(kw) <= 1:
             raise ValueError("Specify what to change on the channel (name, topic, slowmode, nsfw, or parent).")
 
-        try:
-            await asyncio.wait_for(live_before.edit(**kw), timeout=10.0)
-        except asyncio.TimeoutError:
-            raise ValueError(f"Discord rate-limited channel edits on #{before_name} (2 renames per 10 minutes per channel cap). Wait a few minutes and try again.")
-        except discord.RateLimited as rl:
-            raise ValueError(f"Discord rate-limited channel edits on #{before_name}. Retry in ~{int(rl.retry_after) + 1}s.")
-        except discord.HTTPException as exc:
-            if exc.status == 429:
-                raise ValueError(f"Discord rate-limited channel edits on #{before_name} (HTTP 429). Wait a few minutes and try again.")
-            raise ValueError(f"Discord API error editing channel: {exc}")
+        await asyncio.wait_for(live_before.edit(**kw), timeout=10.0)
 
         verified = await guild.fetch_channel(live_before.id)
         if requested_rename is not None and verified.name != requested_rename:
@@ -1038,7 +1031,8 @@ async def execute_plan(
             )
             results.append(res)
         except Exception as exc:
-            results.append(f"Step {idx} ({step['action']}) failed: {exc}")
+            logging.exception("Action %s at step %s", step["action"], idx)
+            results.append(f"Step {idx} ({step['action'].replace('_', ' ')}) failed: {failure(exc)}")
             break
     return results
 
@@ -1049,24 +1043,32 @@ class ConfirmDeleteView(discord.ui.View):
         self.author_id = author_id
         self.confirmed: bool | None = None
 
-    @discord.ui.button(label="Confirm deletion", style=discord.ButtonStyle.danger)
-    async def confirm_btn(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message("Only the requester can confirm this.", ephemeral=True)
-            return
-        self.confirmed = True
+    async def on_timeout(self):
         for child in self.children:
-            child.disabled = True  # type: ignore[attr-defined]
-        await interaction.response.defer()
-        self.stop()
+            child.disabled = True
 
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
-    async def cancel_btn(self, interaction: discord.Interaction, _button: discord.ui.Button) -> None:
+    async def on_error(self, interaction, error, item):
+        logging.error("Confirmation interaction", exc_info=error)
+        send = interaction.followup.send if interaction.response.is_done() else interaction.response.send_message
+        await send(failure(error), ephemeral=True)
+
+    async def decide(self, interaction, confirmed):
         if interaction.user.id != self.author_id:
-            await interaction.response.send_message("Only the requester can cancel this.", ephemeral=True)
+            await interaction.response.send_message("Hold up. Whoever asked for the wipe gets this click.", ephemeral=True)
             return
-        self.confirmed = False
+        if self.is_finished() or self.confirmed is not None:
+            await interaction.response.send_message("That call’s already closed.", ephemeral=True)
+            return
+        self.confirmed = confirmed
         for child in self.children:
-            child.disabled = True  # type: ignore[attr-defined]
-        await interaction.response.defer()
+            child.disabled = True
         self.stop()
+        await interaction.response.defer()
+
+    @discord.ui.button(label=CONFIRM, style=discord.ButtonStyle.danger)
+    async def confirm_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await self.decide(interaction, True)
+
+    @discord.ui.button(label=CANCEL, style=discord.ButtonStyle.secondary)
+    async def cancel_btn(self, interaction: discord.Interaction, _button: discord.ui.Button):
+        await self.decide(interaction, False)
