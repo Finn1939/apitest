@@ -41,7 +41,8 @@ python python/test_provider_config.py
 python python/test_memory_store.py
 python python/bot.py
 ```
-- **Live VC usage**: Use `/vc_join` to connect, speak naturally for a reply, `/vc_say` to request speech, and `/vc_leave` to disconnect. Fish realtime ASR detects turns; only recognized user turns are sent to chat.
-- **Voice providers**: Set `FISH_AUDIO_API_KEY` and `FISH_AUDIO_REFERENCE_ID` for Fish realtime transcription and the selected Fish TTS voice. With `AI_PROVIDER=openai`, NVIDIA handles the chat response between transcription and TTS.
+- **Live VC usage**: Use `/vc_join` to connect, speak naturally for a reply, `/vc_say` to request speech, `/vc_beep` to play a generated two-second playback test without calling a TTS API, `/vc_status` to inspect voice state and audio diagnostics, and `/vc_leave` to disconnect. Gemini Live Transcription recognizes user turns; only recognized turns are sent to chat.
+- **Voice fallback**: If no voice audio arrives within 30 seconds, Capri posts a text-chat hint. If ASR is unavailable, `/vc_say` can still connect in TTS-only mode; failed speech replies are sent as text instead.
+- **Voice providers**: Set `GEMINI_API_KEY` for live transcription and `FISH_AUDIO_API_KEY` plus `FISH_AUDIO_REFERENCE_ID` for the selected Fish TTS voice. With `AI_PROVIDER=openai`, NVIDIA handles the chat response between transcription and TTS.
 - **Python voice runtime**: Install `python/requirements.txt` and run `python python/bot.py`; the Node bot does not support voice channels. See [ENV_SETUP.md](./ENV_SETUP.md).
 - **Minimal Storage**: Streams audio purely in RAM (~35 MB for Python voice packages + system `libopus`/`ffmpeg`, 0 MB audio saved to disk; only text transcripts go to SQLite).

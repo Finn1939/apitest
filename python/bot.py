@@ -1,6 +1,7 @@
 import asyncio
 import ctypes.util
 import json
+import logging
 import os
 import random
 from pathlib import Path
@@ -66,11 +67,16 @@ FISH_AUDIO_REFERENCE_ID = os.getenv(
     "FISH_AUDIO_REFERENCE_ID",
     "fdef76c9b2e741119d817754bd8b5dd0",
 ).strip()
-FISH_ASR_MODEL = os.getenv("FISH_ASR_MODEL", "transcribe-stream-1").strip()
+GEMINI_ASR_MODEL = os.getenv("GEMINI_ASR_MODEL", "gemini-3.5-transcribe-live").strip()
 FISH_TTS_MODEL = os.getenv("FISH_TTS_MODEL", "s2.1-pro-free").strip()
 VOICE_VAD_THRESHOLD = float(os.getenv("VOICE_VAD_THRESHOLD", "110"))
 
 gemini_client = genai.Client(api_key=GEMINI_KEY) if CHAT_PROVIDER == "gemini" and GEMINI_KEY else None
+gemini_asr_client = (
+    genai.Client(api_key=GEMINI_KEY, http_options={"api_version": "v1beta"})
+    if GEMINI_KEY
+    else None
+)
 openai_client = AsyncOpenAI(api_key=OPENAI_KEY, base_url=AI_API_URL.replace("/chat/completions", "")) if CHAT_PROVIDER == "openai" and OPENAI_KEY else None
 
 db = open_memory_db(DB_PATH)
@@ -89,6 +95,45 @@ def ensure_opus_loaded() -> None:
         discord.opus.load_opus(library)
     except OSError as exc:
         raise RuntimeError(f"Could not load Discord's Opus library `{library}`: {exc}") from exc
+
+
+class _VoiceHandshakeFrameFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno != logging.DEBUG:
+            return True
+
+        message = record.msg
+        if message in {
+            "Set MLS external sender",
+            "MLS proposals processed",
+            "MLS welcome processed for transition id %d",
+            "MLS commit processed for transition id %d",
+            "Preparing for DAVE epoch %d",
+            "Preparing for DAVE transition id %d for protocol version %d",
+            "Executing DAVE transition id %d",
+            "Voice RESUME succeeded.",
+        }:
+            return True
+
+        if isinstance(message, str) and message.startswith(
+            ("Voice websocket binary frame received:", "Sending voice websocket binary frame:")
+        ):
+            return True
+
+        if message in ("Voice websocket frame received: %s", "Sending voice websocket frame: %s."):
+            arguments = record.args
+            if isinstance(arguments, tuple):
+                frame = arguments[0] if arguments else None
+            elif isinstance(arguments, dict):
+                frame = arguments
+            else:
+                frame = None
+            opcode = frame.get("op") if isinstance(frame, dict) else None
+            if opcode in {21, 22, 23, 24, 31}:
+                record.msg = "DAVE voice websocket frame: op=%s"
+                record.args = (opcode,)
+                return True
+        return False
 
 
 async def complete_ai(system_prompt: str, user_prompt: str, temperature: float = 0.7, attachments: list[tuple[bytes, str]] | None = None, response_mime_type: str | None = None) -> str:
@@ -207,6 +252,7 @@ async def handle_voice_action(
     voice_channel: Any = None,
     text: str = "",
     text_channel: Any = None,
+    enable_asr: bool = True,
 ) -> str:
     if op == "leave":
         had_session = await voice_mgr.leave(guild.id)
@@ -261,15 +307,21 @@ async def handle_voice_action(
             voice_channel=voice_channel,
             fish_api_key=FISH_AUDIO_API_KEY,
             reference_id=FISH_AUDIO_REFERENCE_ID,
-            asr_model=FISH_ASR_MODEL,
+            gemini_client=gemini_asr_client,
+            enable_asr=enable_asr,
+            asr_model=GEMINI_ASR_MODEL,
             tts_model=FISH_TTS_MODEL,
             vad_threshold=VOICE_VAD_THRESHOLD,
             text_channel=text_channel,
             on_transcript=_on_vc_transcript,
             on_user_turn=_on_vc_user_turn,
         )
-        mode_note = "Fish realtime transcription + TTS" if listen_ok else "Fish TTS only (install discord-ext-voice-recv to hear VC)"
-        return f"Joined #{voice_channel.name} ({mode_note}; {FISH_ASR_MODEL} → {AI_MODEL} → {FISH_TTS_MODEL})."
+        mode_note = (
+            "Gemini Live transcription + Fish TTS"
+            if listen_ok
+            else "Voice listening unavailable; use text chat here (Fish TTS only)"
+        )
+        return f"Joined #{voice_channel.name} ({mode_note}; {GEMINI_ASR_MODEL} → {AI_MODEL} → {FISH_TTS_MODEL})."
 
     if op == "say":
         session = voice_mgr.get(guild.id)
@@ -279,8 +331,14 @@ async def handle_voice_action(
                 voice_channel = populated[0] if populated else (guild.voice_channels[0] if guild.voice_channels else None)
             if voice_channel is None:
                 raise ValueError("Not in a voice channel and no voice channel found to join.")
-            await handle_voice_action("join", guild=guild, voice_channel=voice_channel, text_channel=text_channel)
-        ok = await voice_mgr.say(guild.id, f"Say this naturally out loud in Capri's voice: {text}")
+            await handle_voice_action(
+                "join",
+                guild=guild,
+                voice_channel=voice_channel,
+                text_channel=text_channel,
+                enable_asr=False,
+            )
+        ok = await voice_mgr.say(guild.id, text)
         if not ok:
             raise RuntimeError("Failed to queue speech for the Fish voice session.")
         return f'Queued to speak in VC: "{text[:140]}"'
@@ -360,7 +418,7 @@ async def slash_status(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(f"**{client.user.name}** online on `discord.py` | Ping: {round(client.latency * 1000)}ms | Brain: {msgs} messages, {members} synced members{vc_note}")
 
 
-@tree.command(name="vc_join", description="Bring Capri into a voice channel with Fish ASR, NVIDIA chat, and Fish TTS")
+@tree.command(name="vc_join", description="Bring Capri into a voice channel with Gemini ASR, chat, and Fish TTS")
 @app_commands.describe(channel="Voice channel to join (optional if you are already in one)")
 async def slash_vc_join(interaction: discord.Interaction, channel: discord.VoiceChannel | discord.StageChannel | None = None) -> None:
     if not interaction.guild:
@@ -383,7 +441,9 @@ async def slash_vc_join(interaction: discord.Interaction, channel: discord.Voice
     except Exception as exc:
         detail = str(exc).strip() or repr(exc)
         print(f"[Capri /vc_join error] {type(exc).__name__}: {detail}")
-        await interaction.followup.send(f"Couldn't join VC: {detail}")
+        await interaction.followup.send(
+            f"Couldn't join VC: {detail}\nText fallback: mention Capri here to continue chatting."
+        )
 
 
 @tree.command(name="vc_leave", description="Disconnect Capri from the current voice channel")
@@ -411,14 +471,52 @@ async def slash_vc_say(interaction: discord.Interaction, prompt: str) -> None:
     target_vc = interaction.user.voice.channel if isinstance(interaction.user, discord.Member) and interaction.user.voice else None
     try:
         res = await handle_voice_action("say", guild=interaction.guild, voice_channel=target_vc, text=prompt, text_channel=interaction.channel)
+        print(f"[Capri /vc_say] {res}")
         await interaction.followup.send(f"🎙️ {res}")
     except Exception as exc:
         detail = str(exc).strip() or repr(exc)
         print(f"[Capri /vc_say error] {type(exc).__name__}: {detail}")
-        await interaction.followup.send(f"VC speech failed: {detail}")
+        await interaction.followup.send(
+            f"VC speech failed: {detail}\nText fallback: {prompt[:1700]}"
+        )
 
 
-@tree.command(name="vc_status", description="Check Capri's Fish voice link and audio config")
+@tree.command(name="vc_beep", description="Play a generated two-second tone to test voice playback")
+async def slash_vc_beep(interaction: discord.Interaction) -> None:
+    if not interaction.guild:
+        await interaction.response.send_message("Run this inside a server.", ephemeral=True)
+        return
+    if not can_run_commands(interaction.user, COMMAND_USER_IDS, ALLOW_GUILD_ADMINS):
+        await interaction.response.send_message(DENIED_MSG, ephemeral=True)
+        return
+    sess = voice_mgr.get(interaction.guild.id)
+    if not sess:
+        await interaction.response.send_message(
+            "Capri is not connected. Run `/vc_join` first, then try `/vc_beep`.",
+            ephemeral=True,
+        )
+        return
+    if not sess.enqueue_test_tone():
+        await interaction.response.send_message(
+            "Capri's voice session is stopping; rejoin with `/vc_join` and try again.",
+            ephemeral=True,
+        )
+        return
+    dave_note = ""
+    if sess.dave_blocking_audio():
+        version, ready, can_encrypt = sess.dave_state()
+        dave_note = (
+            f"\n⚠️ DAVE E2EE is not ready (protocol {version}, session ready={ready}, "
+            f"can_encrypt={can_encrypt}). The tone is playing locally but listeners will "
+            "likely hear nothing until DAVE finishes; try `/vc_leave` + `/vc_join`."
+        )
+    await interaction.response.send_message(
+        "Queued a generated 440 Hz, two-second test tone (no TTS API used)." + dave_note,
+        ephemeral=True,
+    )
+
+
+@tree.command(name="vc_status", description="Check Capri's live voice link and audio config")
 async def slash_vc_status(interaction: discord.Interaction) -> None:
     if not interaction.guild:
         await interaction.response.send_message("Run this inside a server.", ephemeral=True)
@@ -426,15 +524,59 @@ async def slash_vc_status(interaction: discord.Interaction) -> None:
     sess = voice_mgr.get(interaction.guild.id)
     if not sess:
         await interaction.response.send_message(
-            f"Not in VC | Fish ASR: `{FISH_ASR_MODEL}` | Fish TTS: `{FISH_TTS_MODEL}` | "
+            f"Not in VC | Gemini ASR: `{GEMINI_ASR_MODEL}` | Fish TTS: `{FISH_TTS_MODEL}` | "
             f"Voice receive: `{'installed' if HAS_VOICE_RECV else 'not installed'}` | "
-            f"Fish key: `{'configured' if FISH_AUDIO_API_KEY else 'missing'}`"
+            f"Gemini ASR key: `{'configured' if gemini_asr_client else 'missing'}` | "
+            f"Fish TTS key: `{'configured' if FISH_AUDIO_API_KEY else 'missing'}`"
         )
         return
+    listening_status = (
+        "active"
+        if sess.enable_asr and sess.sink is not None
+        else "TTS-only"
+        if not sess.enable_asr
+        else "unavailable; TTS remains available"
+    )
+    bot_member = interaction.guild.me
+    voice_state = bot_member.voice if bot_member else None
+    speak_allowed = (
+        sess.voice_channel.permissions_for(bot_member).speak
+        if bot_member
+        else None
+    )
+    voice_connection = getattr(sess.voice_client, "_connection", None)
+    dave_session = getattr(voice_connection, "dave_session", None)
+    voice_mode = getattr(voice_connection, "mode", None)
+    dave_protocol_version = getattr(voice_connection, "dave_protocol_version", None)
+    dave_ready = getattr(dave_session, "ready", None)
+    dave_encrypting = getattr(voice_connection, "can_encrypt", None)
+    dave_status_value = getattr(dave_session, "status", None)
+    dave_status = getattr(dave_status_value, "name", dave_status_value)
+    dave_encryption_stats = dave_session.get_encryption_stats() if dave_session else None
+    dave_encrypt_failures = getattr(dave_encryption_stats, "failures", None)
     await interaction.response.send_message(
-        f"🎙️ Connected in **#{sess.voice_channel.name}** | Fish ASR: `{sess.asr_model}` | "
-        f"Fish TTS: `{sess.tts_model}` | Voice receive: `{'active' if HAS_VOICE_RECV else 'speak-only'}` | "
-        f"Buffered: `{sess.audio_source.buffered_bytes()} B`"
+        f"🎙️ Connected in **#{sess.voice_channel.name}** | Gemini ASR: `{sess.asr_model}` | "
+        f"Fish TTS: `{sess.tts_model}` | Listening: `{listening_status}` | "
+        f"TTS requests/successes: `{sess._tts_requests}/{sess._tts_successes}` | "
+        f"API audio bytes: `{sess._tts_audio_bytes}` | "
+        f"Playback frames read: `{sess.audio_source.audio_frames_read()}` | "
+        f"Non-silent frames read: `{sess.audio_source.audio_non_silent_frames_read()}` | "
+        f"Last-frame PCM RMS (all samples): `{sess.audio_source.last_audio_rms():.1f}` | "
+        f"Buffered: `{sess.audio_source.buffered_bytes()} B` | "
+        f"Playing: `{sess.voice_client.is_playing() if sess.voice_client else False}` | "
+        f"Speak allowed: `{speak_allowed if speak_allowed is not None else 'unknown'}` | "
+        f"Server-muted: `{voice_state.mute if voice_state else 'unknown'}` | "
+        f"Self-muted: `{voice_state.self_mute if voice_state else 'unknown'}` | "
+        f"Stage-suppressed: `{voice_state.suppress if voice_state else 'unknown'}` | "
+        f"Voice mode: `{voice_mode or 'unknown'}` | "
+        f"DAVE protocol: `{dave_protocol_version if dave_protocol_version is not None else 'unknown'}` | "
+        f"DAVE ready: `{dave_ready if dave_ready is not None else 'unknown'}` | "
+        f"DAVE encrypting outbound: `{dave_encrypting if dave_encrypting is not None else 'unknown'}` | "
+        f"DAVE session status: `{dave_status if dave_status is not None else 'unknown'}` | "
+        f"DAVE encrypt failures: `{dave_encrypt_failures if dave_encrypt_failures is not None else 'unknown'}` | "
+        f"Playback errors: `{sess._playback_errors}` "
+        f"(last: `{sess._last_playback_error or 'none'}`) | "
+        f"Last TTS error: `{sess._last_tts_error or 'none'}`"
     )
 
 
@@ -616,4 +758,9 @@ async def on_message(message: discord.Message) -> None:
 if __name__ == "__main__":
     if not DISCORD_TOKEN:
         raise RuntimeError("Missing DISCORD_TOKEN in .env")
+    logging.getLogger("discord.voice_client").setLevel(logging.DEBUG)
+    gateway_logger = logging.getLogger("discord.gateway")
+    gateway_logger.setLevel(logging.DEBUG)
+    gateway_logger.addFilter(_VoiceHandshakeFrameFilter())
+    logging.getLogger("discord.voice_state").setLevel(logging.DEBUG)
     client.run(DISCORD_TOKEN)
