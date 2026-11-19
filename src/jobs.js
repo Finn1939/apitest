@@ -56,7 +56,6 @@ export function createJobs(db) {
     let result = await completeAI({
       messages: [{ role: "system", content: prompt }],
       thinking: true,
-      maxTokens: 1024,
       temperature: 0.7,
     });
     result = result.match(/\{[\s\S]*\}/)?.[0] || "";
@@ -102,7 +101,6 @@ export function createJobs(db) {
           .replace("{{JOURNAL}}", () => journal.map((row) => row.entry).join("\n")),
       }],
       thinking: true,
-      maxTokens: 350,
     }).then((persona) => {
       if (!persona.trim()) return;
       db.transaction(() => {
@@ -129,7 +127,6 @@ export function createJobs(db) {
           .replace("{{FACTS}}", () => facts.map((row) => `${row.subject}: ${row.fact}`).join("\n")),
       }],
       thinking: true,
-      maxTokens: 350,
       temperature: 0.9,
     }).then((entry) => {
       if (!entry.trim()) return;

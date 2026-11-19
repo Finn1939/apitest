@@ -61,7 +61,6 @@ export async function streamReply({
   messages,
   onDelta = () => {},
   abortSignal,
-  maxTokens = config.replyMaxTokens,
   temperature = config.replyTemperature,
   topP = 0.95,
   thinking = config.replyThinking,
@@ -74,9 +73,6 @@ export async function streamReply({
     const filter = createThinkFilter();
     let emitted = false;
 
-    const attemptMaxTokens = emptyRetries === 0
-      ? maxTokens
-      : Math.max(maxTokens, Math.min(maxTokens * 2 ** emptyRetries, 3072));
     const attemptThinking = emptyRetries >= 2 ? false : thinking;
 
     try {
@@ -109,7 +105,6 @@ export async function streamReply({
         const stream = await entry.client.chat.completions.create({
           model: config.aiModel,
           messages: toOpenAIMessages(messages),
-          max_tokens: attemptMaxTokens,
           temperature,
           top_p: topP,
           stream: true,
@@ -141,7 +136,7 @@ export async function streamReply({
       if (content.trim()) return content;
 
       lastError = new Error(
-        `stream produced no visible content (finish_reason=${finishReason ?? "unknown"}, thinking=${attemptThinking}, max_tokens=${attemptMaxTokens})`,
+        `stream produced no visible content (finish_reason=${finishReason ?? "unknown"}, thinking=${attemptThinking})`,
       );
       emptyRetries += 1;
     } catch (error) {

@@ -32,15 +32,40 @@ export function renderAliveness(now = new Date(), lastSpokeAt = Date.now(), mood
   return ALIVENESS_BLOCK.replace("{{CURRENT_STATE}}", () => buildCurrentState(now, lastSpokeAt, moodOverride));
 }
 
+export function splitDiscordMessage(text, limit = 2000) {
+  if (!Number.isSafeInteger(limit) || limit < 1) {
+    throw new RangeError("limit must be a positive safe integer");
+  }
+  const remaining = String(text || "");
+  const chunks = [];
+  let start = 0;
+  while (remaining.length - start > limit) {
+    const end = start + limit;
+    let splitAt = remaining.lastIndexOf("\n", end - 1);
+    if (splitAt < start) splitAt = remaining.lastIndexOf(" ", end - 1);
+    if (splitAt < start) splitAt = end;
+    else splitAt += 1;
+    chunks.push(remaining.slice(start, splitAt));
+    start = splitAt;
+  }
+  if (start < remaining.length) chunks.push(remaining.slice(start));
+  return chunks;
+}
+
 export async function deliverReply(message, answer, { lastSpokeAtRef, spontaneous = false, onSent } = {}) {
-  const text = String(answer || "").slice(0, 2000);
+  const text = String(answer || "");
+  const chunks = splitDiscordMessage(text);
   const wordCount = text.trim().split(/\s+/).filter(Boolean).length;
   if (wordCount <= 8) {
     await new Promise((resolve) => setTimeout(resolve, 700 + Math.random() * 1800));
   }
-  const sent = spontaneous ? await message.channel.send(text) : await message.reply(text);
-  if (onSent) {
-    try { onSent(sent); } catch { /* ignore */ }
+  for (const [index, chunk] of chunks.entries()) {
+    const sent = index === 0 && !spontaneous
+      ? await message.reply(chunk)
+      : await message.channel.send(chunk);
+    if (onSent) {
+      try { onSent(sent); } catch { /* ignore */ }
+    }
   }
   if (lastSpokeAtRef) lastSpokeAtRef.value = Date.now();
   if (!spontaneous && wordCount <= 8 && Math.random() < 0.2) {
@@ -79,20 +104,27 @@ export async function deliverStreamedReply(message, produce, { lastSpokeAtRef, d
 
     acceptingDeltas = false;
     await editQueue;
-    const text = (finalText || buffer).trim().slice(0, 2000);
+    const text = (finalText || buffer).trim();
     if (!text) throw new Error("empty stream");
 
     let final = text;
     if (dupCheck) {
       try {
         const replacement = await dupCheck(text);
-        if (replacement && replacement.trim()) final = replacement.trim().slice(0, 2000);
+        if (replacement && replacement.trim()) final = replacement.trim();
       } catch (error) {
         console.warn("Dedup check failed; keeping streamed text:", error.message);
       }
     }
 
-    await sent.edit(final);
+    const chunks = splitDiscordMessage(final);
+    await sent.edit(chunks[0]);
+    for (const chunk of chunks.slice(1)) {
+      const continuation = await message.channel.send(chunk);
+      if (onSent) {
+        try { onSent(continuation); } catch { /* ignore */ }
+      }
+    }
     if (lastSpokeAtRef) lastSpokeAtRef.value = Date.now();
 
     const wordCount = final.trim().split(/\s+/).filter(Boolean).length;

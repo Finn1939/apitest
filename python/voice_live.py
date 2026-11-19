@@ -3,6 +3,8 @@ from __future__ import annotations
 import array
 import asyncio
 import inspect
+from capri_replies import failure
+from voice_streams import speaker_streams
 import math
 import sys
 import threading
@@ -38,7 +40,6 @@ except Exception as exc:
     print(f"[Capri voice receive unavailable] {type(exc).__name__}: {str(exc).strip() or repr(exc)}")
 
 DISCORD_FRAME_BYTES = 3840  # 20ms @ 48kHz, 16-bit stereo PCM (960 * 2 * 2)
-MAX_BUFFER_BYTES = 48000 * 4 * 12  # ~12 seconds cap in RAM, zero disk storage
 ASR_CONNECT_TIMEOUT_SECONDS = 20
 VOICE_INPUT_TIMEOUT_SECONDS = 30
 FISH_TTS_URL = "https://api.fish.audio/v1/tts"
@@ -176,12 +177,6 @@ class VoiceAudioSource(_AUDIO_SOURCE_BASE):  # type: ignore[misc]
             chunk, self._prev_sample = resample_24k_mono_to_48k_stereo(pcm_24k, self._prev_sample)
             if chunk:
                 self._buf.extend(chunk)
-                if len(self._buf) > MAX_BUFFER_BYTES:
-                    excess = len(self._buf) - MAX_BUFFER_BYTES
-                    # Keep 4-byte stereo alignment
-                    excess -= excess % 4
-                    if excess > 0:
-                        del self._buf[:excess]
 
     def enqueue_48k_stereo(self, pcm_48k: bytes) -> None:
         if not pcm_48k or self._closed:
@@ -254,9 +249,23 @@ def _make_voice_sink(
         def __init__(self) -> None:
             super().__init__()
             self._hangover_until: dict[int, float] = {}
+            self._stats_lock = threading.Lock()
+            self._input_pcm_frames = 0
+            self._input_voiced_frames = 0
+            self._input_forwarded_frames = 0
+            self._last_input_rms = 0.0
 
         def wants_opus(self) -> bool:
             return False
+
+        def input_stats(self) -> tuple[int, int, int, float]:
+            with self._stats_lock:
+                return (
+                    self._input_pcm_frames,
+                    self._input_voiced_frames,
+                    self._input_forwarded_frames,
+                    self._last_input_rms,
+                )
 
         def write(self, user: discord.User | discord.Member | None, data: Any) -> None:
             if user is None or getattr(user, "bot", False):
@@ -269,7 +278,14 @@ def _make_voice_sink(
                 return
             now = time.monotonic()
             uid = int(user.id)
-            if pcm_rms(pcm_16k) >= vad_threshold:
+            rms = pcm_rms(pcm_16k)
+            voiced = rms >= vad_threshold
+            with self._stats_lock:
+                self._input_pcm_frames += 1
+                self._last_input_rms = rms
+                if voiced:
+                    self._input_voiced_frames += 1
+            if voiced:
                 self._hangover_until[uid] = now + 0.85
             elif now > self._hangover_until.get(uid, 0.0):
                 return
@@ -278,6 +294,9 @@ def _make_voice_sink(
                 loop.call_soon_threadsafe(on_pcm, uid, speaker_name, pcm_16k)
             except RuntimeError:
                 pass
+            else:
+                with self._stats_lock:
+                    self._input_forwarded_frames += 1
 
         def cleanup(self) -> None:
             self._hangover_until.clear()
@@ -301,11 +320,13 @@ class CapriVoiceSession:
         tts_model: str = "s2.1-pro-free",
         vad_threshold: float = 110.0,
         text_channel: Any = None,
+        on_command: Callable[..., Awaitable[bool]] | None = None,
         on_transcript: Callable[[int, str, str, bool], Awaitable[None] | None] | None = None,
         on_user_turn: Callable[[int, str, str], Awaitable[str | None] | str | None] | None = None,
     ) -> None:
         self.guild = guild
         self.voice_channel = voice_channel
+        self._fish_http = None
         self.fish_api_key = fish_api_key
         self.reference_id = reference_id
         self.gemini_client = gemini_client
@@ -314,30 +335,34 @@ class CapriVoiceSession:
         self.tts_model = tts_model
         self.vad_threshold = vad_threshold
         self.text_channel = text_channel
+        self.on_command = on_command
+        self._chat_queue = asyncio.Queue()
         self.on_transcript = on_transcript
         self.on_user_turn = on_user_turn
 
         self.audio_source = VoiceAudioSource()
         self.voice_client: discord.VoiceClient | None = None
         self.sink: Any = None
-        self._audio_queue: asyncio.Queue[tuple[int, str, bytes]] = asyncio.Queue(maxsize=250)
-        self._turn_queue: asyncio.Queue[tuple[int, str, str]] = asyncio.Queue(maxsize=20)
-        self._speech_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=20)
+        self._audio_queue: asyncio.Queue[tuple[int, str, bytes]] = asyncio.Queue()
+        self._turn_queue: asyncio.PriorityQueue[tuple[int, int, int, str, str]] = asyncio.PriorityQueue()
+        self._speech_queue: asyncio.Queue[str] = asyncio.Queue()
         self._stop_event = asyncio.Event()
         self._ready_event = asyncio.Event()
         self._audio_received_event = asyncio.Event()
+        self._asr_turns = 0
         self._session_error: Exception | None = None
         self._runner_task: asyncio.Task[None] | None = None
         self._response_task: asyncio.Task[None] | None = None
         self._speech_task: asyncio.Task[None] | None = None
-        self._last_speaker_id: int | None = None
-        self._last_speaker_name = ""
         self._tts_requests = 0
         self._tts_successes = 0
         self._tts_audio_bytes = 0
         self._last_tts_error: str | None = None
         self._playback_errors = 0
         self._last_playback_error: str | None = None
+        self._playback_restart_attempts = 0
+        self._playback_restart_task: asyncio.Task[None] | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     @property
     def is_connected(self) -> bool:
@@ -347,23 +372,23 @@ class CapriVoiceSession:
         if self._stop_event.is_set():
             return
         self._audio_received_event.set()
-        if self._audio_queue.full():
-            try:
-                self._audio_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                pass
-        try:
-            self._audio_queue.put_nowait((user_id, speaker_name, pcm_16k))
-        except asyncio.QueueFull:
-            pass
+        self._audio_queue.put_nowait((user_id, speaker_name, pcm_16k))
 
     async def start(self) -> bool:
         loop = asyncio.get_running_loop()
+        self._loop = loop
         try:
             if self.enable_asr and HAS_VOICE_RECV and voice_recv is not None:
                 self.voice_client = await self.voice_channel.connect(cls=voice_recv.VoiceRecvClient, self_deaf=False)
             else:
                 self.voice_client = await self.voice_channel.connect(self_deaf=False)
+
+            if not await self.wait_for_dave():
+                version, ready, can_encrypt = self.dave_state()
+                raise RuntimeError(
+                    "Discord DAVE voice encryption did not become ready "
+                    f"(version={version}, ready={ready}, can_encrypt={can_encrypt})."
+                )
 
             if not self.voice_client.is_playing():
                 self.voice_client.play(
@@ -423,8 +448,8 @@ class CapriVoiceSession:
         Frames sent in that state carry no DAVE layer, so other clients drop them
         and listeners hear silence even though local playback counters advance.
         """
-        version, _ready, can_encrypt = self.dave_state()
-        return version > 0 and not can_encrypt
+        version, ready, can_encrypt = self.dave_state()
+        return version > 0 and not (ready and can_encrypt)
 
     async def wait_for_dave(self, timeout: float = DAVE_READY_TIMEOUT_SECONDS) -> bool:
         deadline = asyncio.get_running_loop().time() + timeout
@@ -449,6 +474,36 @@ class CapriVoiceSession:
             f"[Capri voice playback error] {type(error).__name__}: {self._last_playback_error}",
             flush=True,
         )
+        if self._loop is not None and self._loop.is_running():
+            self._loop.call_soon_threadsafe(self._schedule_playback_restart)
+
+    def _schedule_playback_restart(self) -> None:
+        if self._stop_event.is_set():
+            return
+        if self._playback_restart_task and not self._playback_restart_task.done():
+            return
+        if self._playback_restart_attempts >= 5:
+            print("[Capri voice] Playback restart limit reached; reconnect with /vc_leave and /vc_join.", flush=True)
+            return
+        self._playback_restart_attempts += 1
+        self._playback_restart_task = asyncio.create_task(self._restart_playback())
+
+    async def _restart_playback(self) -> None:
+        await asyncio.sleep(0.5)
+        if self._stop_event.is_set() or not await self.wait_for_dave():
+            if not self._stop_event.is_set():
+                await self._notify_text_channel("My voice encryption is still syncing. Rejoin voice if I stay silent.")
+            return
+        voice_client = self.voice_client
+        if voice_client is None or not voice_client.is_connected() or voice_client.is_playing():
+            return
+        try:
+            self.audio_source = VoiceAudioSource()
+            voice_client.play(self.audio_source, after=self._record_playback_error)
+        except Exception as exc:
+            detail = _exception_detail(exc)
+            self._last_playback_error = detail
+            print(f"[Capri voice playback restart error] {type(exc).__name__}: {detail}", flush=True)
 
     async def _emit_transcript(self, speaker_id: int, speaker_name: str, text: str, is_bot: bool) -> None:
         clean = " ".join(text.split()).strip()
@@ -469,21 +524,12 @@ class CapriVoiceSession:
                 return
             if self.sink is None:
                 self._ready_event.set()
-                await self._notify_text_channel(
-                    "Voice listening isn't available right now. You can still chat with Capri here "
-                    "or use `/vc_say` for voice output."
-                )
+                await self._notify_text_channel("My mic feed’s quiet. Type here, or use `/vc_say` if you want me on the speakers.")
                 await self._run_voice_workers()
                 return
             if self.gemini_client is None:
                 raise RuntimeError("Set GEMINI_API_KEY to enable Gemini Live transcription.")
-            async with self.gemini_client.aio.live.connect(
-                model=self.asr_model,
-                config={
-                    "response_modalities": ["TEXT"],
-                    "input_audio_transcription": {"language_codes": []},
-                },
-            ) as live_session:
+            async with self._connect_asr() as live_session:
                 self._ready_event.set()
                 await self._run_voice_workers(live_session)
         except asyncio.CancelledError:
@@ -494,23 +540,29 @@ class CapriVoiceSession:
             self._ready_event.set()
             detail = _exception_detail(exc)
             print(f"[Capri Gemini voice error] {type(exc).__name__}: {detail}")
-            await self._notify_text_channel(
-                "Gemini Live transcription failed; the voice session disconnected. "
-                f"Text fallback: mention Capri here to continue chatting. Details: `{detail[:1000]}`"
-            )
+            await self._notify_text_channel("Lost my voice link. Catch me here in text.")
         finally:
             await self.stop()
+
+    def _connect_asr(self):
+        return self.gemini_client.aio.live.connect(
+            model=self.asr_model,
+            config={"response_modalities": ["TEXT"], "input_audio_transcription": {"language_codes": []}},
+        )
+
+    async def _listen_to_speakers(self, warm):
+        await speaker_streams(self._audio_queue, self._turn_queue, warm, self._connect_asr,
+                              lambda pcm: types.Blob(data=pcm, mime_type="audio/pcm;rate=16000"),
+                              self._notify_text_channel)
 
     async def _run_voice_workers(self, live_session: Any = None) -> None:
         workers: list[asyncio.Task[Any]] = []
         input_watchdog: asyncio.Task[None] | None = None
         if live_session is not None:
-            workers.extend([
-                asyncio.create_task(self._send_audio_loop(live_session)),
-                asyncio.create_task(self._receive_asr_loop(live_session)),
-            ])
+            workers.append(asyncio.create_task(self._listen_to_speakers(live_session)))
             input_watchdog = asyncio.create_task(self._watch_initial_voice_input())
         workers.extend([
+            asyncio.create_task(self._dispatch_turns()),
             asyncio.create_task(self._respond_loop()),
             asyncio.create_task(self._speak_loop()),
             asyncio.create_task(self._stop_event.wait()),
@@ -526,10 +578,7 @@ class CapriVoiceSession:
                         self._session_error = error
                         detail = _exception_detail(error)
                         print(f"[Capri voice task error] {type(error).__name__}: {detail}")
-                        await self._notify_text_channel(
-                            f"Voice listening stopped: `{detail[:800]}`. "
-                            "Text fallback: mention Capri here to continue chatting."
-                        )
+                        await self._notify_text_channel("My voice feed cut out. I’m still here in chat.")
                         break
                 if self._session_error is None:
                     self._session_error = RuntimeError("Voice session ended unexpectedly.")
@@ -548,50 +597,7 @@ class CapriVoiceSession:
             )
         except TimeoutError:
             if not self._stop_event.is_set():
-                await self._notify_text_channel(
-                    "I haven't received voice audio yet. If you spoke and I didn't hear you, "
-                    "mention Capri here to continue in text."
-                )
-
-    async def _send_audio_loop(self, live_session: Any) -> None:
-        while not self._stop_event.is_set():
-            user_id, speaker_name, first_frame = await self._audio_queue.get()
-            pcm_16k = bytearray(first_frame)
-            deadline = asyncio.get_running_loop().time() + 0.1
-            while len(pcm_16k) < 3200:
-                delay = deadline - asyncio.get_running_loop().time()
-                if delay <= 0:
-                    break
-                try:
-                    user_id, speaker_name, audio_frame = await asyncio.wait_for(
-                        self._audio_queue.get(),
-                        timeout=delay,
-                    )
-                except TimeoutError:
-                    break
-                self._last_speaker_id = user_id
-                self._last_speaker_name = speaker_name
-                pcm_16k.extend(audio_frame)
-
-            self._last_speaker_id = user_id
-            self._last_speaker_name = speaker_name
-            await live_session.send_realtime_input(
-                audio=types.Blob(data=bytes(pcm_16k), mime_type="audio/pcm;rate=16000")
-            )
-
-    async def _receive_asr_loop(self, live_session: Any) -> None:
-        async for response in live_session.receive():
-            content = getattr(response, "server_content", None)
-            transcription = getattr(content, "input_transcription", None)
-            text = str(getattr(transcription, "text", "") or "").strip()
-            if text:
-                await self._turn_queue.put((
-                    self._last_speaker_id or 0,
-                    self._last_speaker_name or "Crew",
-                    text,
-                ))
-        if not self._stop_event.is_set():
-            raise RuntimeError("Gemini Live transcription connection closed.")
+                await self._notify_text_channel("Haven’t heard a sound yet. If you’re talking, ping me here.")
 
     def _interrupt_speech(self) -> None:
         self.audio_source.clear()
@@ -605,10 +611,19 @@ class CapriVoiceSession:
                 except asyncio.QueueEmpty:
                     break
 
+    async def _dispatch_turns(self) -> None:
+        while not self._stop_event.is_set():
+            _priority, _order, speaker_id, speaker_name, text = await self._turn_queue.get()
+            turn = (speaker_id, speaker_name, text)
+            self._asr_turns += 1
+            handled = self.on_command and await self.on_command(self, *turn)
+            if not handled:
+                await self._chat_queue.put(turn)
+            await self._emit_transcript(*turn, False)
+
     async def _respond_loop(self) -> None:
         while not self._stop_event.is_set():
-            turn = await self._turn_queue.get()
-            await self._emit_transcript(*turn, False)
+            turn = await self._chat_queue.get()
             task = asyncio.create_task(self._answer_turn(*turn))
             self._response_task = task
             try:
@@ -619,7 +634,7 @@ class CapriVoiceSession:
             except Exception as exc:
                 detail = _exception_detail(exc)
                 print(f"[Capri voice response error] {type(exc).__name__}: {detail}")
-                await self._notify_text_channel(f"Capri voice response failed: `{detail}`")
+                await self.say_text(failure(exc))
             finally:
                 if self._response_task is task:
                     self._response_task = None
@@ -638,9 +653,7 @@ class CapriVoiceSession:
             if not await self.wait_for_dave():
                 self._last_tts_error = "DAVE E2EE not ready; audio would be inaudible to listeners"
                 print(f"[Capri voice] {self._last_tts_error}", flush=True)
-                await self._notify_text_channel(
-                    f"Capri can't speak yet (Discord voice encryption isn't ready), so here's the text:\n{text[:1800]}"
-                )
+                await self._notify_text_channel(f"My voice link’s still locking in. Here’s what I wanted to say:\n{text[:1800]}")
                 continue
             task = asyncio.create_task(self._synthesize_speech(text))
             self._speech_task = task
@@ -661,9 +674,7 @@ class CapriVoiceSession:
                 detail = _exception_detail(exc)
                 self._last_tts_error = detail
                 print(f"[Capri Fish TTS error] {type(exc).__name__}: {detail}")
-                await self._notify_text_channel(
-                    f"Capri couldn't speak that reply, so here's the text instead:\n{text[:1800]}"
-                )
+                await self._notify_text_channel(f"My voice cut out. Here’s what I wanted to say:\n{text[:1800]}")
             finally:
                 if self._speech_task is task:
                     self._speech_task = None
@@ -683,26 +694,31 @@ class CapriVoiceSession:
         }
         total_bytes = 0
         pending = bytearray()
-        timeout = aiohttp.ClientTimeout(total=90)
-        async with aiohttp.ClientSession(timeout=timeout) as http:
-            async with http.post(FISH_TTS_URL, headers=headers, json=payload) as response:
-                if response.status >= 400:
-                    body = (await response.text())[:500]
-                    raise RuntimeError(f"Fish TTS returned HTTP {response.status}: {body}")
-                async for chunk in response.content.iter_chunked(8192):
-                    pending.extend(chunk)
-                    complete_length = len(pending) - (len(pending) % 2)
-                    if complete_length:
-                        pcm = bytes(pending[:complete_length])
-                        del pending[:complete_length]
-                        self.audio_source.enqueue_24k_mono(pcm)
-                        total_bytes += len(pcm)
+        if self._fish_http is None:
+            self._fish_http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None))
+        async with self._fish_http.post(FISH_TTS_URL, headers=headers, json=payload) as response:
+            if response.status >= 400:
+                body = (await response.text())[:500]
+                raise RuntimeError(f"Fish TTS returned HTTP {response.status}: {body}")
+            async for chunk in response.content.iter_chunked(8192):
+                pending.extend(chunk)
+                complete_length = len(pending) - (len(pending) % 2)
+                if complete_length:
+                    pcm = bytes(pending[:complete_length])
+                    del pending[:complete_length]
+                    await self._enqueue_tts_audio(pcm)
+                    total_bytes += len(pcm)
         if pending:
             raise RuntimeError("Fish TTS returned an incomplete 16-bit PCM sample.")
         if total_bytes == 0:
             raise RuntimeError("Fish TTS returned no audio.")
         await self._emit_transcript(0, "Capri", text, True)
         return total_bytes
+
+    async def _enqueue_tts_audio(self, pcm_24k_mono: bytes) -> None:
+        if self._stop_event.is_set():
+            raise asyncio.CancelledError
+        self.audio_source.enqueue_24k_mono(pcm_24k_mono)
 
     async def _notify_text_channel(self, message: str) -> None:
         if self.text_channel is None:
@@ -719,6 +735,9 @@ class CapriVoiceSession:
         if self._stop_event.is_set():
             return
         self._stop_event.set()
+        if self._playback_restart_task and not self._playback_restart_task.done():
+            self._playback_restart_task.cancel()
+            await asyncio.gather(self._playback_restart_task, return_exceptions=True)
         self.audio_source.cleanup()
         self._interrupt_speech()
 
@@ -744,6 +763,10 @@ class CapriVoiceSession:
         if self._runner_task and self._runner_task is not current and not self._runner_task.done():
             self._runner_task.cancel()
             await asyncio.gather(self._runner_task, return_exceptions=True)
+
+        if self._fish_http:
+            await self._fish_http.close()
+            self._fish_http = None
 
 
 class VoiceSessionManager:
@@ -771,6 +794,7 @@ class VoiceSessionManager:
         tts_model: str = "s2.1-pro-free",
         vad_threshold: float = 110.0,
         text_channel: Any = None,
+        on_command: Callable[..., Awaitable[bool]] | None = None,
         on_transcript: Callable[[int, str, str, bool], Awaitable[None] | None] | None = None,
         on_user_turn: Callable[[int, str, str], Awaitable[str | None] | str | None] | None = None,
     ) -> tuple[CapriVoiceSession, bool]:
@@ -783,7 +807,8 @@ class VoiceSessionManager:
 
         existing = self._sessions.get(guild.id)
         if existing:
-            if existing.is_connected and existing.voice_channel.id == voice_channel.id:
+            if (existing.is_connected and existing.voice_channel.id == voice_channel.id
+                    and (not enable_asr or existing.sink is not None)):
                 return existing, existing.sink is not None
             await existing.stop()
             self._sessions.pop(guild.id, None)
@@ -799,6 +824,7 @@ class VoiceSessionManager:
             tts_model=tts_model,
             vad_threshold=vad_threshold,
             text_channel=text_channel,
+            on_command=on_command,
             on_transcript=on_transcript,
             on_user_turn=on_user_turn,
         )

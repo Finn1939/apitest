@@ -4,6 +4,7 @@ import time
 from typing import Any
 
 from davey import MediaType
+from discord.opus import OpusError
 from discord.ext import voice_recv
 from discord.ext.voice_recv.opus import PacketDecoder
 
@@ -19,7 +20,7 @@ def _drop_packet(decoder: Any, packet: Any, reason: str) -> bool:
     last_log = getattr(decoder, "_capri_dave_last_log", 0.0)
     if now - last_log >= 10:
         _log.warning(
-            "Dropping DAVE-protected voice packets for SSRC %s (%s since last report): %s",
+            "Dropping voice packets for SSRC %s (%s since last report): %s",
             decoder.ssrc,
             failures,
             reason,
@@ -64,6 +65,17 @@ def _decrypt_packet(decoder: Any, packet: Any) -> bool:
     return True
 
 
+def _process_packet(decoder: Any, packet: Any, original: Any) -> Any:
+    if not _decrypt_packet(decoder, packet):
+        return None
+
+    try:
+        return original(decoder, packet)
+    except OpusError as exc:
+        _drop_packet(decoder, packet, f"Opus decoder rejected packet: {exc}")
+        return None
+
+
 def install_dave_receive_patch() -> None:
     version = getattr(voice_recv, "__version__", "")
     match = re.match(r"^(\d+)\.(\d+)\.(\d+)", version)
@@ -81,9 +93,7 @@ def _install_dave_receive_patch() -> None:
     original = current
 
     def process_packet(decoder: Any, packet: Any) -> Any:
-        if not _decrypt_packet(decoder, packet):
-            return None
-        return original(decoder, packet)
+        return _process_packet(decoder, packet, original)
 
     setattr(process_packet, "_capri_dave_aware", True)
     PacketDecoder._process_packet = process_packet

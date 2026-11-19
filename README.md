@@ -11,10 +11,13 @@ Capri is a living, autonomous Discord persona with full-server CRUD control, dee
 - **Full Member & Topology Directory**: Syncs every member in the server (`GuildMembers` intent), roles, nicknames, and voice presence into SQLite (`guild_members` + `guild_state`) alongside `sqlite-vec` + FTS5 hybrid memory.
 - **Dual AI Provider**: Supports **Google Gemini (`GEMINI_API_KEY`)** out of the box AND **NVIDIA / OpenAI-compatible endpoints (`NVIDIA_API_KEYS`)**.
 
-## Quick Setup (Option A — Node.js `discord.js`)
-1. **Install dependencies** (Node.js 20+):
+## Quick setup (Python `discord.py`, default)
+For a complete fresh-clone, update, and voice setup walkthrough, see
+[Pull and run Capri](./RUN_BOT.md).
+
+1. **Install Python dependencies**:
    ```bash
-   npm install
+   python -m pip install -r python/requirements.txt
    ```
 2. **Enable Discord Bot Intents** in the [Discord Developer Portal](https://discord.com/developers/applications) under **Bot -> Privileged Gateway Intents**:
    - **Presence Intent** (optional)
@@ -25,14 +28,25 @@ Capri is a living, autonomous Discord persona with full-server CRUD control, dee
    cp .env.minimal.example .env
    ```
    Fill in `DISCORD_TOKEN`, `GEMINI_API_KEY` (or `NVIDIA_API_KEY`), and `COMMAND_USER_IDS`.
-4. **Run tests & start**:
+4. **Run tests & start the Python bot**:
    ```bash
-   npm test
+   python -m unittest discover -s python
    npm start
    ```
 
-## Quick Setup (Option B — Python `discord.py` + 2-Way Live AI Voice Channels)
-Prefer running Capri on native **Python `discord.py` (>= 2.4.0)** with **real-time 2-way AI Voice Channel conversation** (`gemini-3.8-live`, zero local model weights, zero saved audio files on disk)? A full `discord.py` implementation lives in `python/` and reads the exact same `.env`, `personality.txt`, and `memory.db`:
+## Node.js alternative
+
+The `discord.js` implementation remains available. Install Node.js 20+ and the npm
+dependencies, then use `npm run start:node` instead of `npm start`:
+```bash
+npm install
+npm test
+npm run start:node
+```
+
+## Python voice features
+
+The Python implementation reads the same `.env`, `personality.txt`, and `memory.db`:
 ```bash
 pip install -r python/requirements.txt
 python python/test_actions_schema.py

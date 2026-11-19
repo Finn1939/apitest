@@ -10,7 +10,5 @@ class TestChatProviderSelection(unittest.TestCase):
     def test_auto_uses_gemini_chat_only_when_chat_key_is_present(self):
         self.assertEqual(select_chat_provider("auto", "gemini-chat-key"), "gemini")
         self.assertEqual(select_chat_provider("auto", ""), "openai")
-
-
 if __name__ == "__main__":
     unittest.main()

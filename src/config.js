@@ -69,7 +69,6 @@ export const config = {
   convoEngageMs: Math.max(1, Number(process.env.CONVO_ENGAGE_MINUTES || 15)) * 60_000,
   timezone: process.env.TIMEZONE || "Asia/Manila",
   timezoneLabel: process.env.TIMEZONE_LABEL || "PHT",
-  memoryContextTokens: Math.max(4000, Number(process.env.MEMORY_CONTEXT_TOKENS || 48000)),
   analysisEnabled: process.env.ANALYSIS_ENABLED !== "false",
   analysisMaxPerMinute: Math.max(1, Number(process.env.ANALYSIS_MAX_PER_MIN || 16)),
   reactionFlushMs: Math.max(20, Number(process.env.REACTION_FLUSH_MINUTES || 2) * 60_000),
@@ -77,7 +76,6 @@ export const config = {
   gameWatchCooldownMs: Math.max(5, Number(process.env.GAME_WATCH_COOLDOWN_MINUTES || 30)) * 60_000,
   replyThinking: process.env.REPLY_THINKING === "true",
   replyTemperature: Math.min(2, Math.max(0, Number(process.env.REPLY_TEMPERATURE || 0.85))),
-  replyMaxTokens: Math.max(256, Number(process.env.REPLY_MAX_TOKENS || 1200)),
   visionTransport: String(process.env.VISION_TRANSPORT || "base64").toLowerCase() === "url" ? "url" : "base64",
 };
 

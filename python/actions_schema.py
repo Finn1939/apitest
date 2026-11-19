@@ -684,14 +684,25 @@ def validate_plan(plan: Any) -> dict[str, Any]:
     return plan
 
 
+# Broad verbs like "make" and "talk" also occur in ordinary conversation.
+# Keep the prefix as an explicit escape hatch for unusual operations.
+CHAT_VERBS = {"make", "say", "talk", "give", "build", "create", "show", "list",
+              "set", "send", "take", "change", "update", "add", "remove", "write"}
+
+
 def is_action_request(text: str, prefix: str = "t", allow_unaddressed: bool = False, is_named: bool = False) -> bool:
     raw = str(text or "")
     if not raw.strip():
         return False
     if raw.lower().startswith(f"{prefix.lower()} do "):
         return True
-    if ACTION_INTENT_RE.search(raw) and (is_named or allow_unaddressed):
-        return True
+    if is_named or allow_unaddressed:
+        terms = {m[0].lower() for m in ACTION_INTENT_RE.finditer(raw)}
+        if terms - CHAT_VERBS:
+            return True
+        if terms and (re.search(r"<[@#]|\b(?:everyone|slowmode|permissions?|display name|avatar|description)\b", raw, re.I)
+                      or SNOWFLAKE_READ_RE.search(raw)):
+            return True
     if allow_unaddressed and SNOWFLAKE_READ_RE.search(raw):
         return True
     return False

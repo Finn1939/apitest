@@ -269,12 +269,6 @@ function timeAgo(timestamp) {
   return `${Math.floor(minutes / 1440)}d ago`;
 }
 
-export function truncateTokens(text, maxTokens) {
-  const value = String(text || "");
-  const maxChars = maxTokens * 4;
-  return value.length <= maxChars ? value : `${value.slice(0, maxChars - 1)}…`;
-}
-
 export function buildContext(db, {
   message,
   embedVector,
@@ -283,7 +277,6 @@ export function buildContext(db, {
   personality: providedPersonality,
   botId,
   replyTo,
-  memoryContextTokens = 48000,
 }) {
   const personality = providedPersonality ?? readFileSync(personalityPath, "utf8").trim();
   const selfModel = db.prepare("SELECT persona FROM self_model WHERE id = 1").get()?.persona || "";
@@ -463,24 +456,14 @@ export function buildContext(db, {
     .filter(Boolean)
     .join("\n");
 
-  const fixedTokens = estimatedTokens(`${personality}\n${speakerText}\n${rosterText}\n${serverKnowledge}`);
-  const memoryBudget = Math.max(4000, memoryContextTokens - fixedTokens - 4000);
-  const factsBudget = Math.min(4500, Math.floor(memoryBudget * 0.14));
-  const recentBudget = Math.min(14000, Math.floor(memoryBudget * 0.43));
-  const relevantBudget = Math.max(0, Math.min(9000, memoryBudget - factsBudget - recentBudget));
-
-  const boundedFacts = truncateTokens(factsText, factsBudget);
-  const boundedRecent = truncateTokens(recentText, recentBudget);
-  const boundedRelevant = truncateTokens(relevantText, relevantBudget);
-
   const memoryBlock = PROMPT_A
     .replace("{{SELF_MODEL}}", () => selfModel)
     .replace("{{SERVER_KNOWLEDGE}}", () => serverKnowledge)
     .replace("{{SPEAKER}}", () => speakerText)
     .replace("{{ROSTER}}", () => rosterText || "No recent speakers recorded yet.")
-    .replace("{{USER_FACTS}}", () => boundedFacts || `You know nothing specific about ${speakerName} yet.`)
-    .replace("{{RELEVANT_MEMORIES}}", () => boundedRelevant || "No relevant memories.")
-    .replace("{{RECENT_MESSAGES}}", () => boundedRecent || "No recent messages.");
+    .replace("{{USER_FACTS}}", () => factsText || `You know nothing specific about ${speakerName} yet.`)
+    .replace("{{RELEVANT_MEMORIES}}", () => relevantText || "No relevant memories.")
+    .replace("{{RECENT_MESSAGES}}", () => recentText || "No recent messages.");
 
   return {
     personality,

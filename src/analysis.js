@@ -103,7 +103,6 @@ export function createAnalyst({ completeAI, maxPerMinute = 16, persona = "" }) {
           },
         ],
         thinking: false,
-        maxTokens: 400,
         temperature: 0.3,
       });
     } catch {
@@ -157,7 +156,6 @@ export function createAnalyst({ completeAI, maxPerMinute = 16, persona = "" }) {
           },
         ],
         thinking: false,
-        maxTokens: 300,
         temperature: 0.85,
       });
     } catch {
@@ -203,7 +201,6 @@ export function createAnalyst({ completeAI, maxPerMinute = 16, persona = "" }) {
           },
         ],
         thinking: false,
-        maxTokens: 300,
         temperature: 0.85,
       });
     } catch {

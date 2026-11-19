@@ -5,7 +5,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from dave_receive import _decrypt_packet, _install_dave_receive_patch, install_dave_receive_patch
+from dave_receive import _decrypt_packet, _install_dave_receive_patch, _process_packet, install_dave_receive_patch
+from discord.opus import OpusError
 from discord.ext.voice_recv.opus import PacketDecoder
 from davey import MediaType
 from voice_live import (
@@ -13,6 +14,7 @@ from voice_live import (
     DISCORD_FRAME_BYTES,
     VoiceAudioSource,
     VoiceSessionManager,
+    _make_voice_sink,
     make_test_tone_48k_stereo,
     pcm_rms,
     pcm_rms_full,
@@ -118,7 +120,81 @@ class TestVoiceAudio(unittest.TestCase):
         self.assertLess(source.last_audio_rms(), 5900.0)
 
 
+class TestVoiceSink(unittest.TestCase):
+    def test_input_stats_distinguish_vad_from_forwarded_audio(self):
+        loop = asyncio.new_event_loop()
+        forwarded = []
+        try:
+            sink = _make_voice_sink(loop, lambda *args: forwarded.append(args), 110)
+            user = SimpleNamespace(id=42, bot=False, display_name="Test")
+            data = SimpleNamespace(pcm=b"decoded")
+            with patch("voice_live.resample_48k_stereo_to_16k_mono", return_value=b"pcm"):
+                with patch("voice_live.pcm_rms", side_effect=[120.0, 50.0]):
+                    sink.write(user, data)
+                    sink.write(user, data)
+            loop.run_until_complete(asyncio.sleep(0))
+            self.assertEqual(sink.input_stats(), (2, 1, 2, 50.0))
+            self.assertEqual(len(forwarded), 2)
+        finally:
+            loop.close()
+
+
 class TestGeminiVoiceConnection(unittest.IsolatedAsyncioTestCase):
+    async def test_response_worker_processes_call_turns_sequentially(self):
+        started = []
+        active = 0
+        max_active = 0
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        second_finished = asyncio.Event()
+
+        async def answer(_speaker_id, _speaker_name, text):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            started.append(text)
+            if text == "first":
+                first_started.set()
+                await release_first.wait()
+            active -= 1
+            if text == "second":
+                second_finished.set()
+
+        session = CapriVoiceSession(
+            guild=SimpleNamespace(id=1),
+            voice_channel=SimpleNamespace(),
+            fish_api_key="test-key",
+            reference_id="test-voice",
+            on_user_turn=answer,
+        )
+        session._chat_queue.put_nowait((1, "Kei", "first"))
+        session._chat_queue.put_nowait((1, "Kei", "second"))
+        worker = asyncio.create_task(session._respond_loop())
+        try:
+            await asyncio.wait_for(first_started.wait(), timeout=1)
+            await asyncio.sleep(0)
+            self.assertEqual(started, ["first"])
+            release_first.set()
+            await asyncio.wait_for(second_finished.wait(), timeout=1)
+            self.assertEqual(started, ["first", "second"])
+            self.assertEqual(max_active, 1)
+        finally:
+            session._stop_event.set()
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+
+    async def test_tts_audio_is_not_limited_by_a_local_buffer_cap(self):
+        session = CapriVoiceSession(
+            guild=SimpleNamespace(id=1),
+            voice_channel=SimpleNamespace(),
+            fish_api_key="test-key",
+            reference_id="test-voice",
+        )
+        session.audio_source.enqueue_24k_mono(b"\x00" * 4)
+
+        await session._enqueue_tts_audio(b"\x01\x00")
+        self.assertEqual(session.audio_source.buffered_bytes(), 24)
+
     async def test_dave_state_blocks_audio_until_encryption_is_available(self):
         session = CapriVoiceSession(
             guild=SimpleNamespace(id=1),
@@ -138,8 +214,9 @@ class TestGeminiVoiceConnection(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(session.dave_blocking_audio())
         self.assertFalse(await session.wait_for_dave(timeout=0))
 
-        dave_session.ready = True
         connection.can_encrypt = True
+        self.assertTrue(session.dave_blocking_audio())
+        dave_session.ready = True
         self.assertEqual(session.dave_state(), (1, True, True))
         self.assertFalse(session.dave_blocking_audio())
         self.assertTrue(await session.wait_for_dave(timeout=0))
@@ -161,6 +238,48 @@ class TestGeminiVoiceConnection(unittest.IsolatedAsyncioTestCase):
         session._stop_event.set()
 
         self.assertFalse(await session.wait_for_dave())
+
+    async def test_playback_error_restarts_player_after_dave_is_ready(self):
+        started = asyncio.Event()
+
+        class FakeVoiceClient:
+            playing = False
+
+            def __init__(self):
+                self._connection = SimpleNamespace(
+                    dave_protocol_version=1,
+                    dave_session=SimpleNamespace(ready=True),
+                    can_encrypt=True,
+                )
+
+            def is_connected(self):
+                return True
+
+            def is_playing(self):
+                return self.playing
+
+            def play(self, _source, after=None):
+                self.playing = True
+                started.set()
+
+        session = CapriVoiceSession(
+            guild=SimpleNamespace(id=1),
+            voice_channel=SimpleNamespace(),
+            fish_api_key="test-key",
+            reference_id="test-voice",
+        )
+        session.voice_client = FakeVoiceClient()
+        session._loop = asyncio.get_running_loop()
+        original_source = session.audio_source
+
+        session._record_playback_error(ValueError("Failed to encrypt: NotReady"))
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        self.assertTrue(session.voice_client.is_playing())
+        self.assertIsNot(session.audio_source, original_source)
+        self.assertEqual(session._playback_errors, 1)
+
+        session._stop_event.set()
 
     async def test_speak_loop_posts_text_when_dave_never_becomes_ready(self):
         class FakeTextChannel:
@@ -271,8 +390,7 @@ class TestGeminiVoiceConnection(unittest.IsolatedAsyncioTestCase):
                     await session._stop_event.wait()
 
                 session._watch_initial_voice_input = tracked_watchdog
-                session._send_audio_loop = wait_for_stop
-                session._receive_asr_loop = wait_for_stop
+                session._listen_to_speakers = wait_for_stop
                 session._respond_loop = wait_for_stop
                 session._speak_loop = wait_for_stop
                 if receive_audio:
@@ -328,6 +446,105 @@ class TestGeminiVoiceConnection(unittest.IsolatedAsyncioTestCase):
                 r"Discord voice setup failed \(RuntimeError\): RuntimeError\(\)",
             ):
                 await session.start()
+        self.assertFalse(voice_client.connected)
+
+    async def test_start_waits_for_dave_encryption_before_starting_audio(self):
+        class FakeVoiceClient:
+            connected = True
+
+            def __init__(self):
+                self._connection = SimpleNamespace(
+                    dave_protocol_version=1,
+                    dave_session=SimpleNamespace(ready=False),
+                    can_encrypt=False,
+                )
+                self.play_started_with_encryption = []
+
+            def is_playing(self):
+                return False
+
+            def play(self, _source, after=None):
+                self.play_started_with_encryption.append(self._connection.can_encrypt)
+
+            def is_connected(self):
+                return self.connected
+
+            def stop(self):
+                pass
+
+            async def disconnect(self, force=False):
+                self.connected = False
+
+        voice_client = FakeVoiceClient()
+
+        class FakeVoiceChannel:
+            async def connect(self, **_kwargs):
+                async def complete_dave_handshake():
+                    await asyncio.sleep(0.01)
+                    voice_client._connection.dave_session.ready = True
+                    voice_client._connection.can_encrypt = True
+
+                asyncio.create_task(complete_dave_handshake())
+                return voice_client
+
+        session = CapriVoiceSession(
+            guild=SimpleNamespace(id=1),
+            voice_channel=FakeVoiceChannel(),
+            fish_api_key="test-key",
+            reference_id="test-voice",
+            enable_asr=False,
+        )
+        await session.start()
+        try:
+            self.assertEqual(voice_client.play_started_with_encryption, [True])
+        finally:
+            await session.stop()
+
+    async def test_start_aborts_without_playing_if_dave_never_becomes_ready(self):
+        class FakeVoiceClient:
+            connected = True
+
+            def __init__(self):
+                self._connection = SimpleNamespace(
+                    dave_protocol_version=1,
+                    dave_session=SimpleNamespace(ready=False),
+                    can_encrypt=False,
+                )
+                self.play_called = False
+
+            def is_playing(self):
+                return False
+
+            def play(self, _source, after=None):
+                self.play_called = True
+
+            def is_connected(self):
+                return self.connected
+
+            async def disconnect(self, force=False):
+                self.connected = False
+
+        voice_client = FakeVoiceClient()
+
+        class FakeVoiceChannel:
+            async def connect(self, **_kwargs):
+                return voice_client
+
+        session = CapriVoiceSession(
+            guild=SimpleNamespace(id=1),
+            voice_channel=FakeVoiceChannel(),
+            fish_api_key="test-key",
+            reference_id="test-voice",
+        )
+
+        async def dave_stays_unready():
+            return False
+
+        session.wait_for_dave = dave_stays_unready
+        with self.assertRaisesRegex(RuntimeError, "DAVE voice encryption did not become ready"):
+            await session.start()
+
+        self.assertFalse(voice_client.play_called)
         self.assertFalse(voice_client.connected)
 
     async def test_start_surfaces_gemini_asr_error_and_disconnects(self):
@@ -418,6 +635,9 @@ class TestGeminiVoiceConnection(unittest.IsolatedAsyncioTestCase):
             async def __aexit__(self, *_args):
                 return False
 
+            async def close(self):
+                pass
+
             def post(self, url, *, headers, json):
                 self.request = (url, headers, json)
                 requests.append(self.request)
@@ -438,70 +658,7 @@ class TestGeminiVoiceConnection(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(requests[0][2]["format"], "pcm")
         self.assertEqual(requests[0][2]["sample_rate"], 24000)
         self.assertEqual(session.audio_source.buffered_bytes(), 16)
-
-    async def test_asr_sender_sends_captured_audio_without_padding_idle_silence(self):
-        session = CapriVoiceSession(
-            guild=SimpleNamespace(id=1),
-            voice_channel=SimpleNamespace(),
-            fish_api_key="test-key",
-            reference_id="test-voice",
-        )
-        pcm_frame = b"\x01\x00" * 320
-        session._audio_queue.put_nowait((22, "Sam", pcm_frame))
-
-        class FakeLiveSession:
-            audio = None
-
-            async def send_realtime_input(self, *, audio):
-                self.audio = audio
-                session._stop_event.set()
-
-        live_session = FakeLiveSession()
-        await session._send_audio_loop(live_session)
-        self.assertEqual(live_session.audio.mime_type, "audio/pcm;rate=16000")
-        self.assertEqual(live_session.audio.data, pcm_frame)
-        self.assertEqual((session._last_speaker_id, session._last_speaker_name), (22, "Sam"))
-
-    async def test_asr_sender_does_not_stream_silence_while_idle(self):
-        session = CapriVoiceSession(
-            guild=SimpleNamespace(id=1),
-            voice_channel=SimpleNamespace(),
-            fish_api_key="test-key",
-            reference_id="test-voice",
-        )
-
-        class FakeLiveSession:
-            sent_audio = False
-
-            async def send_realtime_input(self, *, audio):
-                self.sent_audio = True
-
-        live_session = FakeLiveSession()
-        sender = asyncio.create_task(session._send_audio_loop(live_session))
-        await asyncio.sleep(0.02)
-        self.assertFalse(live_session.sent_audio)
-        sender.cancel()
-        await asyncio.gather(sender, return_exceptions=True)
-
-    async def test_receiver_queues_final_transcript_with_latest_speaker(self):
-        session = CapriVoiceSession(
-            guild=SimpleNamespace(id=1),
-            voice_channel=SimpleNamespace(),
-            fish_api_key="test-key",
-            reference_id="test-voice",
-        )
-        session._last_speaker_id = 22
-        session._last_speaker_name = "Sam"
-
-        class FakeLiveSession:
-            async def receive(self):
-                yield SimpleNamespace(server_content=SimpleNamespace(
-                    input_transcription=SimpleNamespace(text="  Hello there.  ")
-                ))
-                session._stop_event.set()
-
-        await session._receive_asr_loop(FakeLiveSession())
-        self.assertEqual(await session._turn_queue.get(), (22, "Sam", "Hello there."))
+        await session.stop()
 
     async def test_no_voice_input_prompts_text_chat_fallback(self):
         class FakeTextChannel:
@@ -520,7 +677,7 @@ class TestGeminiVoiceConnection(unittest.IsolatedAsyncioTestCase):
         )
         with patch("voice_live.VOICE_INPUT_TIMEOUT_SECONDS", 0):
             await session._watch_initial_voice_input()
-        self.assertIn("mention Capri here", channel.messages[0])
+        self.assertIn("ping me here", channel.messages[0])
 
     async def test_missing_voice_receiver_keeps_text_and_speech_workers_available(self):
         class FakeTextChannel:
@@ -547,7 +704,7 @@ class TestGeminiVoiceConnection(unittest.IsolatedAsyncioTestCase):
         )
         runner = asyncio.create_task(session._run_session_loop())
         await asyncio.wait_for(channel.notified.wait(), timeout=1)
-        self.assertIn("Voice listening isn't available", channel.messages[0])
+        self.assertIn("My mic feed’s quiet", channel.messages[0])
         await session.stop()
         await runner
 
@@ -627,6 +784,29 @@ class TestDaveReceive(unittest.TestCase):
             self.assertFalse(_decrypt_packet(decoder, packet))
         self.assertEqual((decoder._last_seq, decoder._last_ts), (7, 42))
         self.assertEqual(packet.decrypted_data, b"encrypted")
+
+    def test_corrupt_opus_packet_does_not_stop_receive_processing(self):
+        class FakeDaveSession:
+            ready = True
+
+            def set_passthrough_mode(self, enabled, expiry):
+                pass
+
+            def decrypt(self, _user_id, _media_type, _packet):
+                return b"opus"
+
+        class CorruptedOpusError(OpusError):
+            def __init__(self):
+                Exception.__init__(self, "corrupted stream")
+
+        decoder, packet = self._decoder(FakeDaveSession())
+
+        def decode(_decoder, _packet):
+            raise CorruptedOpusError()
+
+        with self.assertLogs("dave_receive", level="WARNING"):
+            self.assertIsNone(_process_packet(decoder, packet, decode))
+        self.assertEqual((decoder._last_seq, decoder._last_ts), (7, 42))
 
     def test_installed_packet_decoder_hook_drops_unready_dave_packets(self):
         _install_dave_receive_patch()

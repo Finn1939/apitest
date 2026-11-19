@@ -5,7 +5,8 @@
   "description": "Capri (Cyberpunk: Edgerunners 2) — autonomous living Discord persona with full server takeover CRUD, confirmation-gated deletes, multimodal context reading, and hybrid persistent memory.",
   "type": "module",
   "scripts": {
-    "start": "node --max-old-space-size=512 src/index.js",
+    "start": "python python/bot.py",
+    "start:node": "node --max-old-space-size=512 src/index.js",
     "test": "node --test test/*.test.js",
     "smoke": "node src/smoke.js",
     "migrate-check": "node migration-check.mjs"

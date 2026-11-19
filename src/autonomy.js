@@ -104,7 +104,6 @@ export function createAutonomyEngine({ db, completeAI, persona }) {
         },
       ],
       thinking: false,
-      maxTokens: 280,
       temperature: 0.9,
     });
 

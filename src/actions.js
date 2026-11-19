@@ -1288,7 +1288,6 @@ export function createActionHandler({
           },
         ],
         thinking: false,
-        maxTokens: 3000,
         temperature: 0,
         responseMimeType: "application/json",
       });

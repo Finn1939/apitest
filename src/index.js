@@ -1284,7 +1284,6 @@ client.on(Events.MessageCreate, async (message) => {
       personality: config.personality,
       botId: client.user.id,
       replyTo: replyTarget,
-      memoryContextTokens: config.memoryContextTokens,
     });
 
     const liveSnapshot = !inDm && (isLearnedGameChannel(message.channel.id) || Date.now() - (otherBotMessageAtByChannel.get(message.channel.id) || 0) <= 5 * 60_000)

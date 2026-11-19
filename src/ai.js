@@ -84,7 +84,6 @@ export function toOpenAIMessages(messages) {
 export async function completeAI({
   messages,
   thinking = false,
-  maxTokens = 1024,
   temperature = 0.85,
   topP = 0.95,
   responseMimeType,
@@ -109,7 +108,6 @@ export async function completeAI({
       const response = await entry.client.chat.completions.create({
         model: config.aiModel,
         messages: toOpenAIMessages(messages),
-        max_tokens: maxTokens,
         temperature,
         top_p: topP,
         chat_template_kwargs: { enable_thinking: thinking },
@@ -150,7 +148,7 @@ export async function askAI({ prompt, personality, systemContext = "", conversat
     ...conversation,
     { role: "user", content: prompt },
   ];
-  const answer = await completeAI({ messages, thinking: false, maxTokens: 700 });
+  const answer = await completeAI({ messages, thinking: false });
   if (!answer) throw new Error("AI API returned an empty response");
   return answer;
 }
